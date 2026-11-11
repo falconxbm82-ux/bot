@@ -23,6 +23,23 @@ class ConfigError(Exception):
 
 
 @dataclass(frozen=True, repr=False)
+class StaffSpec:
+    """Сотрудник из окружения. PIN в представлении объекта не печатается."""
+
+    role: str
+    display_name: str
+    pin: str | None
+    telegram_id: int | None
+
+    def __repr__(self) -> str:
+        return (
+            f"StaffSpec(role={self.role!r}, display_name={self.display_name!r}, "
+            "pin=***, telegram_id="
+            f"{self.telegram_id!r})"
+        )
+
+
+@dataclass(frozen=True, repr=False)
 class Settings:
     bot_token: str
     database_url: str
@@ -35,6 +52,7 @@ class Settings:
     gate_open: time | None
     gate_close: time | None
     slot_minutes: int | None
+    staff: tuple[StaffSpec, ...]
 
     def __repr__(self) -> str:
         return (
@@ -42,7 +60,8 @@ class Settings:
             f"time_zone={self.time_zone!r}, latitude={self.latitude!r}, "
             f"longitude={self.longitude!r}, "
             f"cancel_window_hours={self.cancel_window_hours!r}, "
-            f"gates={len(self.gates)}, slot_minutes={self.slot_minutes!r})"
+            f"gates={len(self.gates)}, slot_minutes={self.slot_minutes!r}, "
+            f"staff={len(self.staff)})"
         )
 
     @property
@@ -88,6 +107,9 @@ class Settings:
             password = urlparse(self.database_url).password
             if password:
                 values.append(password)
+        for spec in self.staff:
+            if spec.pin:
+                values.append(spec.pin)
         return [value for value in values if value]
 
 
@@ -130,7 +152,59 @@ def load_settings() -> Settings:
         gate_open=gate_open,
         gate_close=gate_close,
         slot_minutes=slot_minutes,
+        staff=parse_staff_list(os.environ.get("STAFF")),
     )
+
+
+def parse_staff_list(raw: str | None) -> tuple[StaffSpec, ...]:
+    """Список персонала: роль:имя:PIN или роль:имя:PIN:telegram_id."""
+    if raw is None or not raw.strip():
+        return ()
+    specs: list[StaffSpec] = []
+    seen_names: set[tuple[str, str]] = set()
+    seen_ids: set[int] = set()
+    for chunk in raw.split(";"):
+        piece = chunk.strip()
+        if not piece:
+            continue
+        parts = piece.split(":")
+        if len(parts) not in (3, 4):
+            raise ConfigError(
+                "STAFF задают как роль:имя:PIN или роль:имя:PIN:telegram_id"
+            )
+        role = parts[0].strip()
+        name = parts[1].strip()
+        pin = parts[2].strip()
+        telegram_raw = parts[3].strip() if len(parts) == 4 else ""
+        if role not in ("security", "warehouse"):
+            raise ConfigError("Роль персонала: security или warehouse")
+        if not name or len(name) > 200:
+            raise ConfigError("Укажите имя сотрудника в STAFF")
+        if (role, name) in seen_names:
+            raise ConfigError("В STAFF повторяется одна и та же роль и имя")
+        if pin and not 4 <= len(pin) <= 64:
+            raise ConfigError("PIN персонала — от 4 до 64 символов")
+        telegram_id: int | None = None
+        if telegram_raw:
+            if not telegram_raw.isdigit() or int(telegram_raw) <= 0:
+                raise ConfigError("Telegram ID персонала — положительное число")
+            telegram_id = int(telegram_raw)
+        if not pin and telegram_id is None:
+            raise ConfigError("Для сотрудника нужен PIN или Telegram ID")
+        if telegram_id is not None:
+            if telegram_id in seen_ids:
+                raise ConfigError("В STAFF один Telegram ID указан дважды")
+            seen_ids.add(telegram_id)
+        seen_names.add((role, name))
+        specs.append(
+            StaffSpec(
+                role=role,
+                display_name=name,
+                pin=pin or None,
+                telegram_id=telegram_id,
+            )
+        )
+    return tuple(specs)
 
 
 def redact(text: str, secrets: list[str]) -> str:
