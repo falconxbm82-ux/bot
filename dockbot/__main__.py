@@ -16,19 +16,20 @@ from dockbot.bot.app import run_bot
 from dockbot.config import ConfigError, load_settings, redact
 from dockbot.configure import apply_configuration
 from dockbot.db import make_engine, upgrade_head
+from dockbot.logging_setup import resolve_log_directory, setup_logging
 
 log = logging.getLogger("dockbot")
 
 
 def main() -> None:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s %(message)s",
-    )
+    setup_logging(None)
     secrets: list[str] = []
+    engine = None
     try:
         settings = load_settings()
         secrets = settings.secrets()
+        setup_logging(resolve_log_directory())
+        log.info("process starting")
         settings.require_bot()
         engine = make_engine(settings.database_url)
         try:
@@ -39,7 +40,9 @@ def main() -> None:
             log.info("database connection ok")
             asyncio.run(run_bot(settings, engine))
         finally:
-            engine.dispose()
+            log.info("process stopping")
+            if engine is not None:
+                engine.dispose()
     except ConfigError as exc:
         log.error("%s", redact(str(exc), secrets))
         sys.exit(2)

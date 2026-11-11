@@ -17,6 +17,9 @@ from zoneinfo import ZoneInfo
 PACKAGE_ROOT = Path(__file__).resolve().parent
 PROJECT_ROOT = PACKAGE_ROOT.parent
 
+# Длина PIN персонала на стенде. В ТЗ не задана.
+STAFF_PIN_LENGTH = 6
+
 
 class ConfigError(Exception):
     """Окружение не даёт запустить запрошенный режим."""
@@ -182,8 +185,8 @@ def parse_staff_list(raw: str | None) -> tuple[StaffSpec, ...]:
             raise ConfigError("Укажите имя сотрудника в STAFF")
         if (role, name) in seen_names:
             raise ConfigError("В STAFF повторяется одна и та же роль и имя")
-        if pin and not 4 <= len(pin) <= 64:
-            raise ConfigError("PIN персонала — от 4 до 64 символов")
+        if pin and not (pin.isdigit() and len(pin) == STAFF_PIN_LENGTH):
+            raise ConfigError("PIN персонала на стенде — 6 цифр")
         telegram_id: int | None = None
         if telegram_raw:
             if not telegram_raw.isdigit() or int(telegram_raw) <= 0:

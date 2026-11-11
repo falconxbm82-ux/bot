@@ -17,6 +17,7 @@ from sqlalchemy import select
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
+from dockbot.config import STAFF_PIN_LENGTH
 from dockbot.models import StaffRole, StaffUser
 
 log = logging.getLogger(__name__)
@@ -99,7 +100,8 @@ def require_staff(engine: Engine, telegram_id: int) -> StaffMember:
 def enter_pin(engine: Engine, telegram_id: int, pin: str) -> StaffMember:
     """Первый успешный PIN записывает пустой Telegram ID и не затирает чужой."""
     secret = pin.strip()
-    if not secret or len(secret) > 64:
+    # На стенде PIN персонала — ровно 6 цифр. Отказ общий, без подсказки длины.
+    if not (secret.isdigit() and len(secret) == STAFF_PIN_LENGTH):
         _deny(telegram_id)
     with Session(engine) as session:
         with session.begin():
