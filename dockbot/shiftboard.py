@@ -10,10 +10,10 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 from zoneinfo import ZoneInfo
 
-from dockbot.access import require_staff
+from dockbot.access import require_role
 from dockbot.booking import Trip, _trip, load_zone
 from dockbot.checkpoint import allowed_next
-from dockbot.models import Booking, BookingStatus, Gate
+from dockbot.models import Booking, BookingStatus, Gate, StaffRole
 from dockbot.present import STATUS_LABELS, gate_label, local_parts
 
 MESSAGE_LIMIT = 3500
@@ -61,7 +61,7 @@ def trip_line(trip: Trip, zone: ZoneInfo) -> str:
 def load_shift(
     engine: Engine, telegram_id: int, now: datetime | None = None
 ) -> tuple[ZoneInfo, date, list[Trip]]:
-    require_staff(engine, telegram_id)
+    require_role(engine, telegram_id, StaffRole.warehouse)
     moment = now or datetime.now(ZoneInfo("UTC"))
     zone = load_zone(engine)
     local_day = moment.astimezone(zone).date()

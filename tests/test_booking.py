@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import threading
 import unittest
+from unittest.mock import patch
 from datetime import datetime, time, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -154,6 +155,37 @@ class BookingTests(unittest.TestCase):
         second = self._book(TOMORROW, 9, plate="a100aa77")
         self.assertNotEqual(first.id, second.id)
         self.assertEqual(second.plate, "A100AA77")
+
+    def test_failed_confirm_leaves_no_booking_and_no_event(self) -> None:
+        from dockbot import booking as booking_module
+
+        slot = self._slot(TOMORROW, self.gate_a, 8)
+        real = booking_module._insert_booking
+
+        def fail_after_insert(*args, **kwargs):
+            real(*args, **kwargs)
+            raise RuntimeError("confirm failed")
+
+        with patch.object(booking_module, "_insert_booking", fail_after_insert):
+            with self.assertRaises(RuntimeError):
+                create_booking(
+                    ENGINE,
+                    gate_id=self.gate_a,
+                    slot_start=slot.start,
+                    plate="A100AA77",
+                    make="КАМАЗ",
+                    driver_name="Иванов",
+                    cargo_type="Паллеты",
+                    telegram_id=1,
+                    chat_id=1,
+                    now=NOW,
+                )
+        self.assertEqual(self._count(), 0)
+        with Session(ENGINE) as session:
+            events = session.scalar(
+                select(func.count()).select_from(BookingStatusEvent)
+            )
+        self.assertEqual(events, 0)
 
     def test_double_confirm_by_same_driver_is_one_booking(self) -> None:
         slot = self._slot(TOMORROW, self.gate_a, 8)

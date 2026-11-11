@@ -97,6 +97,15 @@ def require_staff(engine: Engine, telegram_id: int) -> StaffMember:
     return person
 
 
+def require_role(engine: Engine, telegram_id: int, role: StaffRole) -> StaffMember:
+    """Охрана проверяет пропуск и ставит «Прибыл». Склад ведёт смену и ворота."""
+    person = require_staff(engine, telegram_id)
+    if person.role is not role:
+        log.info("staff role denied telegram_id=%s", telegram_id)
+        raise AccessDenied()
+    return person
+
+
 def enter_pin(engine: Engine, telegram_id: int, pin: str) -> StaffMember:
     """Первый успешный PIN записывает пустой Telegram ID и не затирает чужой."""
     secret = pin.strip()
