@@ -83,6 +83,11 @@ TERMINAL_STATUSES: tuple[BookingStatus, ...] = (
     BookingStatus.cancelled,
 )
 
+PLATE_MAX = 32
+MAKE_MAX = 64
+DRIVER_NAME_MAX = 200
+CARGO_MAX = 200
+
 STAFF_ROLE = Enum(
     StaffRole,
     name="staff_role",
@@ -179,10 +184,10 @@ class Booking(Base):
     )
     slot_start: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     slot_end: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    plate: Mapped[str] = mapped_column(String(32), nullable=False)
-    make: Mapped[str] = mapped_column(String(64), nullable=False)
-    driver_name: Mapped[str] = mapped_column(String(200), nullable=False)
-    cargo_type: Mapped[str] = mapped_column(String(200), nullable=False)
+    plate: Mapped[str] = mapped_column(String(PLATE_MAX), nullable=False)
+    make: Mapped[str] = mapped_column(String(MAKE_MAX), nullable=False)
+    driver_name: Mapped[str] = mapped_column(String(DRIVER_NAME_MAX), nullable=False)
+    cargo_type: Mapped[str] = mapped_column(String(CARGO_MAX), nullable=False)
     driver_telegram_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     driver_chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     status: Mapped[BookingStatus] = mapped_column(BOOKING_STATUS, nullable=False)
@@ -274,18 +279,19 @@ class SiteSettings(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
     time_zone: Mapped[str] = mapped_column(String(64), nullable=False)
-    latitude: Mapped[Decimal] = mapped_column(Numeric(9, 6), nullable=False)
-    longitude: Mapped[Decimal] = mapped_column(Numeric(9, 6), nullable=False)
+    latitude: Mapped[Decimal | None] = mapped_column(Numeric(9, 6))
+    longitude: Mapped[Decimal | None] = mapped_column(Numeric(9, 6))
     cancel_window_hours: Mapped[int] = mapped_column(Integer, nullable=False)
 
     __table_args__ = (
         CheckConstraint("id = 1", name="ck_site_settings_singleton"),
         CheckConstraint("char_length(time_zone) > 0", name="ck_site_settings_time_zone"),
         CheckConstraint(
-            "latitude >= -90 AND latitude <= 90", name="ck_site_settings_latitude"
+            "latitude IS NULL OR (latitude >= -90 AND latitude <= 90)",
+            name="ck_site_settings_latitude",
         ),
         CheckConstraint(
-            "longitude >= -180 AND longitude <= 180",
+            "longitude IS NULL OR (longitude >= -180 AND longitude <= 180)",
             name="ck_site_settings_longitude",
         ),
         CheckConstraint(

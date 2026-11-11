@@ -10,9 +10,12 @@ import logging
 import sys
 import traceback
 
+from sqlalchemy import text
+
 from dockbot.bot.app import run_bot
 from dockbot.config import ConfigError, load_settings, redact
-from dockbot.db import check_connection, upgrade_head
+from dockbot.configure import apply_configuration
+from dockbot.db import make_engine, upgrade_head
 
 log = logging.getLogger("dockbot")
 
@@ -31,9 +34,16 @@ def main() -> None:
             log.info(
                 "site settings are incomplete; reminders are not started in this process"
             )
-        upgrade_head()
-        check_connection(settings.database_url)
-        asyncio.run(run_bot(settings))
+        engine = make_engine(settings.database_url)
+        try:
+            upgrade_head()
+            apply_configuration(engine, settings)
+            with engine.connect() as connection:
+                connection.execute(text("SELECT 1"))
+            log.info("database connection ok")
+            asyncio.run(run_bot(settings, engine))
+        finally:
+            engine.dispose()
     except ConfigError as exc:
         log.error("%s", redact(str(exc), secrets))
         sys.exit(2)

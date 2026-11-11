@@ -1,13 +1,11 @@
-"""Стартовый экран водителя: забронировать и мои брони.
-
-Шаги мастера, список рейсов и меню персонала в этот срез не входят.
-"""
+"""Стартовый экран водителя: забронировать и мои брони."""
 
 from __future__ import annotations
 
-from aiogram import F, Router
-from aiogram.filters import CommandStart
-from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram import Router
+from aiogram.filters import Command, CommandStart
+from aiogram.fsm.context import FSMContext
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 router = Router(name="driver")
 
@@ -26,15 +24,19 @@ def driver_menu() -> InlineKeyboardMarkup:
 
 
 @router.message(CommandStart())
-async def start(message: Message) -> None:
+async def start(message: Message, state: FSMContext) -> None:
+    await state.clear()
     await message.answer(START_TEXT, reply_markup=driver_menu())
 
 
-@router.callback_query(F.data == BOOK)
-async def book_not_ready(query: CallbackQuery) -> None:
-    await query.answer("Мастер бронирования ещё не подключён", show_alert=False)
-
-
-@router.callback_query(F.data == MY_BOOKINGS)
-async def bookings_not_ready(query: CallbackQuery) -> None:
-    await query.answer("Список броней ещё не подключён", show_alert=False)
+@router.message(Command("cancel"))
+async def cancel_dialog(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    await state.clear()
+    if data.get("mode") == "move":
+        text = "Диалог сброшен. Бронь не изменена."
+    elif data:
+        text = "Диалог сброшен. Запись не сохранена."
+    else:
+        text = "Диалог сброшен."
+    await message.answer(text, reply_markup=driver_menu())
