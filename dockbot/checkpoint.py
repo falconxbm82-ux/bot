@@ -16,7 +16,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
 from dockbot.access import require_staff
-from dockbot.booking import Trip, _trip
+from dockbot.booking import Trip, _changed, _trip
 from dockbot.models import (
     TERMINAL_STATUSES,
     Booking,
@@ -122,7 +122,9 @@ def apply_mark(
                 )
             )
             session.flush()
-            return _trip(session, booking)
+            trip = _trip(session, booking)
+    _changed(booking_id)
+    return trip
 
 
 def _lookup(

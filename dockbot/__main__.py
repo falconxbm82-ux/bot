@@ -30,10 +30,6 @@ def main() -> None:
         settings = load_settings()
         secrets = settings.secrets()
         settings.require_bot()
-        if not settings.site_is_complete:
-            log.info(
-                "site settings are incomplete; reminders are not started in this process"
-            )
         engine = make_engine(settings.database_url)
         try:
             upgrade_head()
