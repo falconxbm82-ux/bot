@@ -38,6 +38,7 @@ from dockbot.access import (  # noqa: E402
     active_staff,
     enter_pin,
     hash_pin,
+    logout_staff,
     unusable_pin_hash,
     verify_pin,
 )
@@ -170,10 +171,68 @@ class StaffTests(unittest.TestCase):
         guard = _labels(driver_menu(menu_rows(StaffRole.security)))
         self.assertIn("Забронировать", guard)
         self.assertIn("Проверить пропуск", guard)
+        self.assertIn("Выйти из роли", guard)
         self.assertNotIn("Экран смены", guard)
         warehouse = _labels(driver_menu(menu_rows(StaffRole.warehouse)))
         self.assertIn("Экран смены", warehouse)
+        self.assertIn("Выйти из роли", warehouse)
         self.assertNotIn("Проверить пропуск", warehouse)
+        self.assertNotIn("Выйти из роли", plain)
+
+    def test_logout_clears_this_chat_and_keeps_the_pin(self) -> None:
+        guard_id = self._staff(pin="111111", name="Охрана")
+        warehouse_id = self._staff(
+            pin="222222",
+            telegram_id=WAREHOUSE_TG,
+            name="Склад",
+            role=StaffRole.warehouse,
+        )
+        other_id = self._staff(
+            pin="135790",
+            telegram_id=OTHER_TG,
+            name="Вторая охрана",
+        )
+        with Session(ENGINE) as session:
+            warehouse = session.get(StaffUser, warehouse_id)
+            other = session.get(StaffUser, other_id)
+            assert warehouse is not None and other is not None
+            warehouse_hash = warehouse.pin_hash
+            other_hash = other.pin_hash
+        self.assertEqual(active_staff(ENGINE, WAREHOUSE_TG).role, StaffRole.warehouse)
+
+        self.assertTrue(logout_staff(ENGINE, WAREHOUSE_TG))
+        self.assertIsNone(active_staff(ENGINE, WAREHOUSE_TG))
+        self.assertFalse(logout_staff(ENGINE, WAREHOUSE_TG))
+        with Session(ENGINE) as session:
+            warehouse = session.get(StaffUser, warehouse_id)
+            other = session.get(StaffUser, other_id)
+            guard = session.get(StaffUser, guard_id)
+            assert warehouse is not None and other is not None and guard is not None
+            self.assertIsNone(warehouse.telegram_id)
+            self.assertEqual(warehouse.pin_hash, warehouse_hash)
+            self.assertTrue(verify_pin("222222", warehouse.pin_hash))
+            self.assertEqual(other.telegram_id, OTHER_TG)
+            self.assertEqual(other.pin_hash, other_hash)
+            self.assertIsNone(guard.telegram_id)
+
+        person = enter_pin(ENGINE, WAREHOUSE_TG, "111111")
+        self.assertEqual(person.role, StaffRole.security)
+        self.assertEqual(person.telegram_id, WAREHOUSE_TG)
+        with self.assertRaises(AccessDenied):
+            enter_pin(ENGINE, OTHER_TG, "111111")
+        with Session(ENGINE) as session:
+            warehouse = session.get(StaffUser, warehouse_id)
+            other = session.get(StaffUser, other_id)
+            assert warehouse is not None and other is not None
+            self.assertIsNone(warehouse.telegram_id)
+            self.assertEqual(other.telegram_id, OTHER_TG)
+
+        self.assertTrue(logout_staff(ENGINE, WAREHOUSE_TG))
+        self.assertIsNone(active_staff(ENGINE, WAREHOUSE_TG))
+        self.assertEqual(active_staff(ENGINE, OTHER_TG).role, StaffRole.security)
+        again = enter_pin(ENGINE, WAREHOUSE_TG, "222222")
+        self.assertEqual(again.role, StaffRole.warehouse)
+        self.assertEqual(again.telegram_id, WAREHOUSE_TG)
 
     def test_staff_pin_binds_empty_id_and_does_not_overwrite(self) -> None:
         staff_id = self._staff(pin="246810")
