@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
@@ -123,6 +124,18 @@ class _Warehouse:
     hours: tuple[GateHour, ...]
 
 
+_PLATE_LATIN = str.maketrans("ABEKMHOPCTYX", "АВЕКМНОРСТУХ")
+_PLATE_RE = re.compile(r"^[АВЕКМНОРСТУХ]\d{3}[АВЕКМНОРСТУХ]{2}\d{2,3}$")
+
+
+def normalize_plate(raw: str) -> str:
+    """Госномер для мастера: кириллица и пример А123ВС178."""
+    text = "".join(raw.upper().split()).translate(_PLATE_LATIN)
+    if _PLATE_RE.fullmatch(text) is None:
+        raise FieldError("Не похоже на госномер, пример А123ВС178")
+    return text
+
+
 def clean_plate(raw: str) -> FieldValue:
     return _clean(
         raw.strip().upper(),
@@ -157,6 +170,31 @@ def clean_cargo(raw: str) -> FieldValue:
         "Тип груза не может быть пустым.",
         "Тип груза обрезан до",
     )
+
+
+def load_location(engine: Engine) -> tuple[float, float] | None:
+    with Session(engine) as session:
+        row = session.get(SiteSettings, 1)
+        if row is None or row.latitude is None or row.longitude is None:
+            return None
+        return float(row.latitude), float(row.longitude)
+
+
+def list_live(
+    engine: Engine, telegram_id: int, chat_id: int
+) -> list[Trip]:
+    """Живые брони этого чата, включая уже начавшийся слот."""
+    with Session(engine) as session:
+        rows = session.scalars(
+            select(Booking)
+            .where(
+                Booking.driver_telegram_id == telegram_id,
+                Booking.driver_chat_id == chat_id,
+                Booking.status.in_(OCCUPYING_STATUSES),
+            )
+            .order_by(Booking.slot_start, Booking.id)
+        ).all()
+        return [_trip(session, row) for row in rows]
 
 
 def load_zone(engine: Engine) -> ZoneInfo:
@@ -337,7 +375,7 @@ def cancel_booking(
             booking = _lock_owned(session, telegram_id, chat_id, booking_id)
             warehouse = _load_warehouse(session)
             reason = _block_reason(booking.status, booking.slot_start, warehouse, moment)
-            if reason == "Отмена и перенос уже закрыты.":
+            if reason is not None and reason.startswith("Отмена и перенос уже закрыты"):
                 raise WindowClosed(reason)
             if reason is not None:
                 raise NotEditable(reason)
@@ -369,7 +407,7 @@ def reschedule_booking(
                 reason = _block_reason(
                     booking.status, booking.slot_start, warehouse, moment
                 )
-                if reason == "Отмена и перенос уже закрыты.":
+                if reason is not None and reason.startswith("Отмена и перенос уже закрыты"):
                     raise WindowClosed(reason)
                 if reason is not None:
                     raise NotEditable(reason)
@@ -689,9 +727,13 @@ def _block_reason(
     now: datetime,
 ) -> str | None:
     if status not in EDITABLE:
-        return "Эту бронь уже нельзя изменить."
+        return "Эту бронь уже нельзя изменить. Откройте «Мои брони»."
     if not slot_start - now > warehouse.cancel_window:
-        return "Отмена и перенос уже закрыты."
+        hours = int(warehouse.cancel_window.total_seconds() // 3600)
+        return (
+            f"Отмена и перенос уже закрыты: до слота меньше {hours} ч. "
+            "Откройте «Мои брони»."
+        )
     return None
 
 

@@ -22,10 +22,10 @@ from dockbot.booking import (
     clean_cargo,
     clean_driver_name,
     clean_make,
-    clean_plate,
     create_booking,
     gates_with_slots,
     get_owned,
+    normalize_plate,
     load_zone,
     reschedule_booking,
     slots_for_gate,
@@ -39,8 +39,17 @@ from dockbot.bot.ui import (
     RESTART,
     SLOT_PREFIX,
     actor_ids,
+    BACK,
+    CARGO_PREFIX,
+    CURRENT_SLOT,
+    EDIT,
+    back_menu_markup,
+    cancel_step_markup,
+    cargo_markup,
     dates_markup,
     gates_markup,
+    menu_markup,
+    pass_done_markup,
     reply,
     slots_markup,
     summary_markup,
@@ -51,6 +60,13 @@ from dockbot.present import pass_caption, summary_text
 log = logging.getLogger(__name__)
 router = Router(name="wizard")
 _busy: set[tuple[int, int]] = set()
+WIZARD_DAYS = 7
+_CARGO_LABELS = {
+    "pallets": "Паллеты",
+    "bulk": "Навал",
+    "liquid": "Жидкость",
+    "reefer": "Рефрижератор",
+}
 
 
 class BookFlow(StatesGroup):
@@ -61,6 +77,7 @@ class BookFlow(StatesGroup):
     make = State()
     driver_name = State()
     cargo = State()
+    cargo_note = State()
     summary = State()
 
 
@@ -142,7 +159,8 @@ async def pick_slot(query: CallbackQuery, state: FSMContext, engine: Engine) -> 
     await state.set_state(BookFlow.plate)
     await reply(
         query,
-        "Госномер транспортного средства.\nСбросить диалог: /cancel",
+        "Госномер, например А123ВС178.",
+        cancel_step_markup(),
     )
 
 
@@ -150,7 +168,14 @@ async def pick_slot(query: CallbackQuery, state: FSMContext, engine: Engine) -> 
 async def plate_step(message: Message, state: FSMContext) -> None:
     if await _aborted_text(message, state):
         return
-    await _accept_field(message, state, clean_plate, "plate", BookFlow.make, "Марка.")
+    await _accept_field(
+        message,
+        state,
+        _plate_field,
+        "plate",
+        BookFlow.make,
+        "Марка.",
+    )
 
 
 @router.message(BookFlow.make, F.text)
@@ -166,13 +191,43 @@ async def make_step(message: Message, state: FSMContext) -> None:
 async def name_step(message: Message, state: FSMContext) -> None:
     if await _aborted_text(message, state):
         return
-    await _accept_field(
-        message, state, clean_driver_name, "driver_name", BookFlow.cargo, "Тип груза."
-    )
+    try:
+        field = clean_driver_name(message.text or "")
+    except FieldError as exc:
+        await message.answer(str(exc))
+        return
+    await state.update_data(driver_name=field.value)
+    await state.set_state(BookFlow.cargo)
+    await message.answer("Тип груза.", reply_markup=cargo_markup())
+
+
+@router.callback_query(BookFlow.cargo, F.data.startswith(CARGO_PREFIX))
+async def cargo_button(query: CallbackQuery, state: FSMContext, engine: Engine) -> None:
+    code = (query.data or "").removeprefix(CARGO_PREFIX)
+    if code == "other":
+        await state.set_state(BookFlow.cargo_note)
+        await reply(query, "Напишите тип груза.", cancel_step_markup())
+        return
+    label = _CARGO_LABELS.get(code)
+    if label is None:
+        await query.answer("Кнопка устарела", show_alert=True)
+        return
+    await state.update_data(cargo=label)
+    await show_summary(query, state, engine)
 
 
 @router.message(BookFlow.cargo, F.text)
-async def cargo_step(message: Message, state: FSMContext, engine: Engine) -> None:
+async def cargo_step(message: Message, state: FSMContext) -> None:
+    if await _aborted_text(message, state):
+        return
+    await message.answer(
+        "Выберите тип груза кнопкой. «Другое» — если своего варианта нет.",
+        reply_markup=cargo_markup(),
+    )
+
+
+@router.message(BookFlow.cargo_note, F.text)
+async def cargo_note(message: Message, state: FSMContext, engine: Engine) -> None:
     if await _aborted_text(message, state):
         return
     try:
@@ -180,10 +235,41 @@ async def cargo_step(message: Message, state: FSMContext, engine: Engine) -> Non
     except FieldError as exc:
         await message.answer(str(exc))
         return
-    if field.notice:
-        await message.answer(f"{field.notice}: {field.value}")
     await state.update_data(cargo=field.value)
     await show_summary(message, state, engine)
+
+
+@router.callback_query(F.data == CURRENT_SLOT)
+async def current_slot(query: CallbackQuery) -> None:
+    await query.answer("Это текущее окно. Выберите другое.", show_alert=True)
+
+
+@router.callback_query(StateFilter(BookFlow.gate, MoveFlow.gate), F.data == BACK)
+async def back_to_dates(query: CallbackQuery, state: FSMContext, engine: Engine) -> None:
+    await show_dates(query, state, engine)
+
+
+@router.callback_query(StateFilter(BookFlow.slot, MoveFlow.slot), F.data == BACK)
+async def back_to_gates(query: CallbackQuery, state: FSMContext, engine: Engine) -> None:
+    await show_gates(query, state, engine)
+
+
+@router.callback_query(BookFlow.summary, F.data == EDIT)
+async def edit_details(query: CallbackQuery, state: FSMContext) -> None:
+    data = await state.get_data()
+    kept = {
+        "mode": "create",
+        "date": data.get("date"),
+        "gate_id": data.get("gate_id"),
+        "slot_ts": data.get("slot_ts"),
+    }
+    await state.set_data(kept)
+    await state.set_state(BookFlow.plate)
+    await reply(
+        query,
+        "Госномер, например А123ВС178. Дата и слот сохранены.",
+        cancel_step_markup(),
+    )
 
 
 @router.callback_query(StateFilter(BookFlow.summary, MoveFlow.summary), F.data == RESTART)
@@ -283,8 +369,15 @@ async def show_dates(
         await state.clear()
         await reply(event, str(exc), driver_menu())
         return
+    dates = dates[:WIZARD_DAYS]
     await state.set_state(MoveFlow.date if moving else BookFlow.date)
-    text = "Выберите дату." if dates else "На ближайшие дни свободных слотов нет."
+    if not dates:
+        text = "Нет свободных окон. Нажмите «В меню» или попробуйте позже."
+        if preface:
+            text = f"{preface}\n{text}"
+        await reply(event, text, menu_markup())
+        return
+    text = "Выберите дату."
     if preface:
         text = f"{preface}\n{text}"
     await reply(event, text, dates_markup(dates))
@@ -310,8 +403,11 @@ async def show_gates(
         return
     await state.set_state(MoveFlow.gate if moving else BookFlow.gate)
     if not gates:
-        await show_dates(
-            event, state, engine, preface="На эту дату свободных ворот нет."
+        await state.set_state(MoveFlow.gate if moving else BookFlow.gate)
+        await reply(
+            event,
+            "Свободных ворот нет. Вернитесь к дате или откройте меню.",
+            back_menu_markup(),
         )
         return
     text = "Выберите ворота."
@@ -332,20 +428,31 @@ async def show_slots(
         await show_gates(event, state, engine, preface=preface)
         return
     choices, zone = slot
+    moving = data.get("mode") == "move"
     if not choices:
-        await show_gates(
+        await state.set_state(MoveFlow.slot if moving else BookFlow.slot)
+        await reply(
             event,
-            state,
-            engine,
-            preface=preface or "На эти ворота свободных слотов нет.",
+            "Свободных слотов нет. Вернитесь к воротам или откройте меню.",
+            back_menu_markup(),
         )
         return
-    moving = data.get("mode") == "move"
+    current = None
+    if moving and data.get("booking_id"):
+        ids = actor_ids(event)
+        if ids is not None:
+            try:
+                trip = await asyncio.to_thread(
+                    get_owned, engine, ids[0], ids[1], int(data["booking_id"])
+                )
+                current = trip.slot_start
+            except BookingError:
+                current = None
     await state.set_state(MoveFlow.slot if moving else BookFlow.slot)
     text = "Выберите время."
     if preface:
         text = f"{preface}\n{text}"
-    await reply(event, text, slots_markup(choices, zone))
+    await reply(event, text, slots_markup(choices, zone, current))
 
 
 async def show_summary(
@@ -451,7 +558,13 @@ async def _accept_field(message, state, cleaner, key, nxt, question: str) -> Non
         await message.answer(f"{field.notice}: {field.value}")
     await state.update_data(**{key: field.value})
     await state.set_state(nxt)
-    await message.answer(question)
+    await message.answer(question, reply_markup=cancel_step_markup())
+
+
+def _plate_field(raw: str):
+    from dockbot.booking import FieldValue
+
+    return FieldValue(normalize_plate(raw), None)
 
 
 async def _aborted_text(message: Message, state: FSMContext) -> bool:
@@ -486,6 +599,10 @@ async def _send_pass(
         await message.answer_photo(
             BufferedInputFile(qr_png(token), filename="pass.png"),
             caption=caption,
+        )
+        await message.answer(
+            "Пропуск выше. PIN — в подписи к фото.",
+            reply_markup=pass_done_markup(booking_id),
         )
     except Exception:
         log.warning("pass image was not delivered for booking %s", booking_id)

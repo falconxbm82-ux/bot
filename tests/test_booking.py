@@ -313,7 +313,8 @@ class BookingTests(unittest.TestCase):
 
         soon = self._book(TODAY, 10, telegram_id=4, chat_id=4)
         self.assertEqual(
-            change_block(ENGINE, soon, now=NOW), "Отмена и перенос уже закрыты."
+            change_block(ENGINE, soon, now=NOW),
+            "Отмена и перенос уже закрыты: до слота меньше 2 ч. Откройте «Мои брони».",
         )
         with self.assertRaises(WindowClosed):
             cancel_booking(
@@ -394,7 +395,10 @@ class BookingTests(unittest.TestCase):
         trip = self._book(TOMORROW, 11)
         self._set_status(trip.id, BookingStatus.arrived)
         fresh = get_owned(ENGINE, 1, 1, trip.id)
-        self.assertEqual(change_block(ENGINE, fresh, now=NOW), "Эту бронь уже нельзя изменить.")
+        self.assertEqual(
+            change_block(ENGINE, fresh, now=NOW),
+            "Эту бронь уже нельзя изменить. Откройте «Мои брони».",
+        )
         with self.assertRaises(NotEditable):
             cancel_booking(
                 ENGINE, telegram_id=1, chat_id=1, booking_id=trip.id, now=NOW

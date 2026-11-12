@@ -10,10 +10,10 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 from zoneinfo import ZoneInfo
 
-from dockbot.access import require_role
+from dockbot.access import require_staff
 from dockbot.booking import Trip, _trip, load_zone
 from dockbot.checkpoint import allowed_next
-from dockbot.models import Booking, BookingStatus, Gate, StaffRole
+from dockbot.models import Booking, BookingStatus, Gate
 from dockbot.present import STATUS_LABELS, gate_label, local_parts
 
 MESSAGE_LIMIT = 3500
@@ -36,14 +36,14 @@ def checkpoint_actions(trip: Trip) -> tuple[ShiftAction, ...]:
     if allowed_next(trip.status) != BookingStatus.arrived:
         return ()
     return (
-        ShiftAction(BookingStatus.arrived, "Прибыл", f"sf:a:{trip.id}"),
+        ShiftAction(BookingStatus.arrived, "Отметить прибытие", f"sf:a:{trip.id}"),
     )
 
 
 def row_actions(trip: Trip) -> tuple[ShiftAction, ...]:
     target = allowed_next(trip.status)
     if target == BookingStatus.unloading:
-        label = f"На воротах {gate_label(trip.gate_code)}"
+        label = f"На воротах {trip.gate_code}"
         return (ShiftAction(target, label, f"sf:u:{trip.id}"),)
     if target == BookingStatus.completed:
         return (ShiftAction(target, "Разгружен", f"sf:c:{trip.id}"),)
@@ -58,10 +58,34 @@ def trip_line(trip: Trip, zone: ZoneInfo) -> str:
     )
 
 
+def filter_shift(
+    trips: list[Trip],
+    zone: ZoneInfo,
+    mode: str,
+    moment: datetime,
+) -> list[Trip]:
+    """Фильтры монитора: час, ожидание, территория, завершённые."""
+    if mode == "hour":
+        hour = moment.astimezone(zone).hour
+        return [
+            trip
+            for trip in trips
+            if trip.slot_start.astimezone(zone).hour == hour
+        ]
+    statuses = {
+        "wait": {BookingStatus.booked, BookingStatus.confirmed},
+        "onsite": {BookingStatus.arrived, BookingStatus.unloading},
+        "done": {BookingStatus.completed, BookingStatus.late},
+    }.get(mode)
+    if statuses is None:
+        return list(trips)
+    return [trip for trip in trips if trip.status in statuses]
+
+
 def load_shift(
     engine: Engine, telegram_id: int, now: datetime | None = None
 ) -> tuple[ZoneInfo, date, list[Trip]]:
-    require_role(engine, telegram_id, StaffRole.warehouse)
+    require_staff(engine, telegram_id)
     moment = now or datetime.now(ZoneInfo("UTC"))
     zone = load_zone(engine)
     local_day = moment.astimezone(zone).date()

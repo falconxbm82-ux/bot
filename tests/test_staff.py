@@ -144,23 +144,19 @@ class StaffTests(unittest.TestCase):
         with self.assertRaises(AccessDenied):
             read_pass_image(ENGINE, WAREHOUSE_TG, b"not-a-picture")
         with self.assertRaises(AccessDenied):
-            apply_mark(ENGINE, WAREHOUSE_TG, trip.id, BookingStatus.arrived, now=NOW)
+            apply_mark(ENGINE, DRIVER, trip.id, BookingStatus.arrived, now=NOW)
         self.assertEqual(self._status(trip.id), BookingStatus.booked)
         found = find_pass(ENGINE, STAFF_TG, pin=trip.pass_pin)
         self.assertEqual(found.id, trip.id)
-        apply_mark(ENGINE, STAFF_TG, trip.id, BookingStatus.arrived, now=NOW)
-        with self.assertRaises(AccessDenied):
-            apply_mark(ENGINE, STAFF_TG, trip.id, BookingStatus.unloading, now=NOW)
+        apply_mark(ENGINE, WAREHOUSE_TG, trip.id, BookingStatus.arrived, now=NOW)
         self.assertEqual(self._status(trip.id), BookingStatus.arrived)
         marked = apply_mark(
-            ENGINE, WAREHOUSE_TG, trip.id, BookingStatus.unloading, now=NOW
+            ENGINE, STAFF_TG, trip.id, BookingStatus.unloading, now=NOW
         )
         self.assertEqual(marked.status, BookingStatus.unloading)
         self.assertEqual(row_actions(marked)[0].label, "Разгружен")
-        with self.assertRaises(AccessDenied):
-            apply_mark(ENGINE, STAFF_TG, trip.id, BookingStatus.completed, now=NOW)
         done = apply_mark(
-            ENGINE, WAREHOUSE_TG, trip.id, BookingStatus.completed, now=NOW
+            ENGINE, STAFF_TG, trip.id, BookingStatus.completed, now=NOW
         )
         self.assertEqual(done.status, BookingStatus.completed)
 
@@ -177,13 +173,30 @@ class StaffTests(unittest.TestCase):
             )
         self.assertEqual(
             button_labels(driver),
-            ["Забронировать", "Мои брони", "Водитель", "Охрана", "Кладовщик"],
+            [
+                "Записаться",
+                "Мои брони",
+                "Мой пропуск",
+                "Как проехать",
+                "Отменить",
+                "Перенести",
+                "Помощь",
+                "Водитель",
+                "Охрана",
+                "Кладовщик",
+            ],
         )
-        self.assertEqual(button_labels(guard)[0], "Проверить пропуск")
-        self.assertNotIn("Экран смены", button_labels(guard))
-        self.assertNotIn("Забронировать", button_labels(guard))
-        self.assertEqual(button_labels(warehouse)[0], "Экран смены")
-        self.assertNotIn("Проверить пропуск", button_labels(warehouse))
+        self.assertEqual(
+            button_labels(guard)[:4],
+            ["Сканировать QR", "Ввести PIN", "Смена сегодня", "Помощь"],
+        )
+        self.assertNotIn("Монитор смены", button_labels(guard))
+        self.assertNotIn("Записаться", button_labels(guard))
+        self.assertEqual(button_labels(warehouse)[0], "Монитор смены")
+        self.assertIn("Ожидаются", button_labels(warehouse))
+        self.assertIn("На территории", button_labels(warehouse))
+        self.assertIn("Завершены", button_labels(warehouse))
+        self.assertNotIn("Сканировать QR", button_labels(warehouse))
         self.assertNotIn("Мои брони", button_labels(warehouse))
 
     def test_logout_clears_this_chat_and_keeps_the_pin(self) -> None:
@@ -457,9 +470,12 @@ class StaffTests(unittest.TestCase):
         self._staff(pin="246810", telegram_id=STAFF_TG)
         self._warehouse()
         booked = self._book(TOMORROW, 8)
-        self.assertEqual([item.label for item in checkpoint_actions(booked)], ["Прибыл"])
+        self.assertEqual(
+            [item.label for item in checkpoint_actions(booked)],
+            ["Отметить прибытие"],
+        )
         self.assertEqual(row_actions(booked), ())
-        with self.assertRaises(AccessDenied):
+        with self.assertRaises(TransitionRejected):
             apply_mark(ENGINE, STAFF_TG, booked.id, BookingStatus.unloading, now=NOW)
         with self.assertRaises(TransitionRejected):
             apply_mark(ENGINE, WAREHOUSE_TG, booked.id, BookingStatus.unloading, now=NOW)
@@ -472,10 +488,10 @@ class StaffTests(unittest.TestCase):
         )
         self.assertEqual(arrived.status, BookingStatus.arrived)
         self.assertEqual(checkpoint_actions(arrived), ())
-        self.assertEqual(row_actions(arrived)[0].label, "На воротах №1")
+        self.assertEqual(row_actions(arrived)[0].label, "На воротах 1")
         with self.assertRaises(TransitionRejected):
             apply_mark(ENGINE, STAFF_TG, booked.id, BookingStatus.arrived, now=NOW)
-        with self.assertRaises(AccessDenied):
+        with self.assertRaises(TransitionRejected):
             apply_mark(ENGINE, STAFF_TG, booked.id, BookingStatus.completed, now=NOW)
         with self.assertRaises(TransitionRejected):
             apply_mark(ENGINE, WAREHOUSE_TG, booked.id, BookingStatus.completed, now=NOW)
@@ -503,7 +519,7 @@ class StaffTests(unittest.TestCase):
         self.assertEqual(checkpoint_actions(done), ())
         with self.assertRaises(TransitionRejected):
             apply_mark(ENGINE, WAREHOUSE_TG, trip.id, BookingStatus.unloading, now=NOW)
-        with self.assertRaises(AccessDenied):
+        with self.assertRaises(TransitionRejected):
             apply_mark(ENGINE, WAREHOUSE_TG, trip.id, BookingStatus.arrived, now=NOW)
         self.assertEqual(self._status(trip.id), BookingStatus.completed)
         again = self._create(
@@ -560,7 +576,7 @@ class StaffTests(unittest.TestCase):
         with self.assertRaises(TransitionRejected):
             apply_mark(ENGINE, STAFF_TG, late.id, BookingStatus.arrived, now=NOW)
         for target in (BookingStatus.unloading, BookingStatus.completed):
-            with self.assertRaises(AccessDenied):
+            with self.assertRaises(TransitionRejected):
                 apply_mark(ENGINE, STAFF_TG, late.id, target, now=NOW)
         self.assertEqual(self._status(late.id), BookingStatus.late)
         cancelled = self._book(TOMORROW, 10)
@@ -661,10 +677,12 @@ class StaffTests(unittest.TestCase):
         self.assertNotIn("NEXT1", text)
         self.assertNotIn("YEST1", text)
         self.assertEqual(pages[0].text.splitlines()[1], "08:00")
+        guard_zone, guard_day, guard_trips = load_shift(ENGINE, STAFF_TG, now=NOW)
+        del guard_zone
+        self.assertEqual(guard_day, day)
+        self.assertEqual([trip.plate for trip in guard_trips], plates)
         with self.assertRaises(AccessDenied):
             load_shift(ENGINE, OTHER_TG, now=NOW)
-        with self.assertRaises(AccessDenied):
-            load_shift(ENGINE, STAFF_TG, now=NOW)
 
     def test_empty_shift_says_there_are_no_records(self) -> None:
         self._warehouse()

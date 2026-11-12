@@ -158,8 +158,8 @@ class ReminderTests(unittest.TestCase):
         self.assertEqual(longitude, LONGITUDE)
         self.assertIn("20.11.2026", text)
         self.assertIn("08:00", text)
-        self.assertIn("№1", text)
-        self.assertIn("A100AA77", text)
+        self.assertIn("Через 2 часа", text)
+        self.assertIn("ворота 1", text)
         self.assertEqual(self._status(booking_id), BookingStatus.confirmed)
         self.assertIsNotNone(self._column(booking_id, "reminded_2_at"))
         self.assertIsNone(self._column(booking_id, "reminded_24_at"))
@@ -247,7 +247,7 @@ class ReminderTests(unittest.TestCase):
         self.assertEqual([item[0] for item in self.sender.reminders], [402])
         self.assertIsNone(self._column(blocked_id, "reminded_24_at"))
         self.assertIsNotNone(self._column(sent_id, "reminded_24_at"))
-        self.assertIn("SEND1", self.sender.reminders[0][3])
+        self.assertIn("Напоминание: разгрузка", self.sender.reminders[0][3])
 
     def test_arrival_before_the_threshold_blocks_lateness(self) -> None:
         slot = _moment(2026, 11, 20, 8)
@@ -283,8 +283,9 @@ class ReminderTests(unittest.TestCase):
         )
         self.assertEqual(self.sender.reminders, [])
         self.assertEqual(len(self.sender.lates), 1)
-        self.assertIn("LATE1", self.sender.lates[0][1])
-        self.assertIn("20.11.2026", self.sender.lates[0][1])
+        self.assertIn("снято", self.sender.lates[0][1])
+        self.assertIn("Запишитесь снова", self.sender.lates[0][1])
+        self.assertIn("08:00", self.sender.lates[0][1])
         self.assertEqual(self._status(booking_id), BookingStatus.late)
         self.assertIsNotNone(self._column(booking_id, "late_at"))
         self._insert(

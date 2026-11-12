@@ -25,7 +25,7 @@ from dockbot.models import (
     NotificationLog,
     StatusSource,
 )
-from dockbot.present import gate_label, local_parts
+from dockbot.present import local_parts
 
 log = logging.getLogger(__name__)
 
@@ -92,18 +92,18 @@ def reminder_text(
     kind: NotificationKind,
 ) -> str:
     date_text, clock = local_parts(slot_start, slot_end, zone)
-    titles = {
-        NotificationKind.h24: "Напоминание: до разгрузки 24 часа",
-        NotificationKind.h2: "Напоминание: до разгрузки 2 часа",
-        NotificationKind.m30: "Напоминание: до разгрузки 30 минут",
-    }
-    return (
-        f"{titles[kind]}\n"
-        f"Дата: {date_text}\n"
-        f"Время: {clock}\n"
-        f"Ворота: {gate_label(gate_code)}\n"
-        f"Госномер: {plate}"
-    )
+    del plate
+    if kind is NotificationKind.h24:
+        return (
+            f"Напоминание: разгрузка {date_text} {clock} мск, "
+            f"ворота {gate_code}. Пропуск в боте."
+        )
+    if kind is NotificationKind.h2:
+        return (
+            f"Через 2 часа. Разгрузка {date_text} {clock} мск, "
+            f"ворота {gate_code}. Пропуск в боте."
+        )
+    return f"Через 30 минут разгрузка, ворота {gate_code}."
 
 
 def late_text(
@@ -113,14 +113,9 @@ def late_text(
     plate: str,
     zone: ZoneInfo,
 ) -> str:
-    date_text, clock = local_parts(slot_start, slot_end, zone)
-    return (
-        "Окно снято: нет отметки прибытия на КПП.\n"
-        f"Дата: {date_text}\n"
-        f"Время: {clock}\n"
-        f"Ворота: {gate_label(gate_code)}\n"
-        f"Госномер: {plate}"
-    )
+    _date_text, clock = local_parts(slot_start, slot_end, zone)
+    del gate_code, plate
+    return f"Окно {clock} снято: нет отметки на КПП. Запишитесь снова."
 
 
 def catch_up(
