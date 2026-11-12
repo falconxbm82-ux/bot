@@ -122,6 +122,58 @@ def logout_staff(engine: Engine, telegram_id: int) -> bool:
     return True
 
 
+def enter_role(
+    engine: Engine, telegram_id: int, pin: str, role: StaffRole
+) -> StaffMember:
+    """Верный PIN этой роли привязывает чат. Чужой Telegram ID не стирает.
+
+    Если чат был на другой записи, снимается только его привязка.
+    Неверный PIN и чужая занятая роль базу не меняют.
+    """
+    secret = pin.strip()
+    if not (secret.isdigit() and len(secret) == STAFF_PIN_LENGTH):
+        _deny(telegram_id)
+    with Session(engine) as session:
+        with session.begin():
+            rows = session.scalars(
+                select(StaffUser).where(StaffUser.is_active.is_(True))
+            ).all()
+            matched = [
+                row
+                for row in rows
+                if row.role is role and verify_pin(secret, row.pin_hash)
+            ]
+            if len(matched) != 1:
+                _deny(telegram_id)
+            current = session.scalar(
+                select(StaffUser).where(StaffUser.telegram_id == telegram_id)
+            )
+            lock_ids = [matched[0].id]
+            if current is not None and current.id not in lock_ids:
+                lock_ids.append(current.id)
+            locked: dict[int, StaffUser] = {}
+            for staff_id in sorted(lock_ids):
+                row = session.get(StaffUser, staff_id, with_for_update=True)
+                if row is not None:
+                    locked[staff_id] = row
+            target = locked.get(matched[0].id)
+            if target is None or not target.is_active or target.role is not role:
+                _deny(telegram_id)
+            if target.telegram_id is not None and target.telegram_id != telegram_id:
+                _deny(telegram_id)
+            holder = locked.get(current.id) if current is not None else None
+            if (
+                holder is not None
+                and holder.id != target.id
+                and holder.telegram_id == telegram_id
+            ):
+                holder.telegram_id = None
+                session.flush()
+            target.telegram_id = telegram_id
+            session.flush()
+            return _member(target)
+
+
 def enter_pin(engine: Engine, telegram_id: int, pin: str) -> StaffMember:
     """Первый успешный PIN записывает пустой Telegram ID и не затирает чужой."""
     secret = pin.strip()

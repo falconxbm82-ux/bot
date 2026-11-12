@@ -10,6 +10,7 @@ from aiogram.types import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     Message,
+    ReplyKeyboardMarkup,
 )
 
 from dockbot.booking import GateChoice, SlotChoice, Trip
@@ -45,7 +46,7 @@ def actor_ids(event: Message | CallbackQuery) -> tuple[int, int] | None:
 async def reply(
     event: Message | CallbackQuery,
     text: str,
-    markup: InlineKeyboardMarkup | None = None,
+    markup: InlineKeyboardMarkup | ReplyKeyboardMarkup | None = None,
 ) -> None:
     if isinstance(event, Message):
         await event.answer(text, reply_markup=markup)
