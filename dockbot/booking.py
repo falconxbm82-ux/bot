@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -36,6 +37,7 @@ from dockbot.passes import new_pin, new_token
 log = logging.getLogger(__name__)
 
 CONFIRM_LEAD = timedelta(hours=2)
+_change_listeners: list[Callable[[int], None]] = []
 HORIZON_DAYS = 14
 PIN_ATTEMPTS = 8
 EDITABLE = frozenset({BookingStatus.booked, BookingStatus.confirmed})
@@ -258,7 +260,7 @@ def create_booking(
         try:
             with Session(engine) as session:
                 with session.begin():
-                    return _insert_booking(
+                    trip = _insert_booking(
                         session,
                         gate_id=gate_id,
                         slot_start=slot_start,
@@ -270,6 +272,8 @@ def create_booking(
                         chat_id=chat_id,
                         now=moment,
                     )
+            _changed(trip.id)
+            return trip
         except IntegrityError as exc:
             constraint = _constraint_name(exc)
             if constraint in {PIN_CONSTRAINT, TOKEN_CONSTRAINT}:
@@ -343,6 +347,7 @@ def cancel_booking(
             session.add(
                 _event(booking.id, previous, BookingStatus.cancelled, telegram_id)
             )
+    _changed(booking_id)
 
 
 def reschedule_booking(
@@ -372,35 +377,62 @@ def reschedule_booking(
                 if cell is None or not cell.start > moment:
                     raise SlotTaken("Этот слот больше не доступен. Выберите другой.")
                 if _same_slot(booking, cell):
-                    return _trip(session, booking)
-                if _is_occupied(session, cell.gate_id, cell.start, booking.id):
-                    raise SlotTaken("Этот слот уже заняли. Выберите другой.")
-                previous = booking.status
-                booking.gate_id = cell.gate_id
-                booking.slot_start = cell.start
-                booking.slot_end = cell.end
-                booking.rescheduled_at = moment
-                if (
-                    previous is BookingStatus.booked
-                    and cell.start - moment < CONFIRM_LEAD
-                ):
-                    booking.status = BookingStatus.confirmed
-                    booking.confirmed_at = moment
-                    session.add(
-                        _event(
-                            booking.id,
-                            previous,
-                            BookingStatus.confirmed,
-                            telegram_id,
+                    trip = _trip(session, booking)
+                else:
+                    if _is_occupied(session, cell.gate_id, cell.start, booking.id):
+                        raise SlotTaken("Этот слот уже заняли. Выберите другой.")
+                    previous = booking.status
+                    booking.gate_id = cell.gate_id
+                    booking.slot_start = cell.start
+                    booking.slot_end = cell.end
+                    booking.rescheduled_at = moment
+                    booking.reminded_24_at = None
+                    booking.reminded_2_at = None
+                    booking.reminded_30_at = None
+                    if (
+                        previous is BookingStatus.booked
+                        and cell.start - moment < CONFIRM_LEAD
+                    ):
+                        booking.status = BookingStatus.confirmed
+                        booking.confirmed_at = moment
+                        session.add(
+                            _event(
+                                booking.id,
+                                previous,
+                                BookingStatus.confirmed,
+                                telegram_id,
+                            )
                         )
-                    )
-                session.flush()
-                return _trip(session, booking)
+                    session.flush()
+                    trip = _trip(session, booking)
+        _changed(trip.id)
+        return trip
     except IntegrityError as exc:
         if _constraint_name(exc) == SLOT_CONSTRAINT:
             log.info("reschedule slot conflict booking=%s", booking_id)
             raise SlotTaken("Этот слот уже заняли. Выберите другой.") from None
         raise
+
+
+def listen_booking_changed(listener: Callable[[int], None]) -> Callable[[], None]:
+    """После записи брони планировщик обновляет задания. Возврат снимает подписку."""
+    _change_listeners.append(listener)
+
+    def stop() -> None:
+        try:
+            _change_listeners.remove(listener)
+        except ValueError:
+            pass
+
+    return stop
+
+
+def _changed(booking_id: int) -> None:
+    for listener in tuple(_change_listeners):
+        try:
+            listener(booking_id)
+        except Exception:
+            log.info("schedule update failed booking=%s", booking_id)
 
 
 def _insert_booking(
