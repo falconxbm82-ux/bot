@@ -109,6 +109,24 @@ class DocumentReadTests(unittest.TestCase):
             "mismatch",
         )
 
+    def test_sidorov_license_photo_matches_and_petrov_does_not(self) -> None:
+        here = Path(__file__).resolve().parent / "fixtures"
+        plate = "С777СМ77"
+        name = "Сидоров Сидор Сидорович"
+        sidorov = (here / "sidorov-license.jpg").read_bytes()
+        reading = read_document(sidorov, plate, name)
+        self.assertTrue(reading.confident, reading.text)
+        self.assertEqual(reading.verdict, "match")
+        tokens = documents._name_tokens(reading.text)
+        self.assertIn("сидоров", tokens)
+        self.assertIn("сидор", tokens)
+        self.assertIn("сидорович", tokens)
+        self.assertIn("С777СМ77", documents._fold(reading.text))
+        petrov = (here / "petrov-license.jpg").read_bytes()
+        other = read_document(petrov, "В123ВС178", name)
+        self.assertTrue(other.confident, other.text)
+        self.assertEqual(other.verdict, "mismatch")
+
     def test_different_name_on_the_same_plate_is_a_mismatch(self) -> None:
         image = _card("ИВАНОВ ИВАН ИВАНОВИЧ", "ГОСНОМЕР А123ВС178")
         reading = read_document(image, PLATE, "ыфсфыфс")

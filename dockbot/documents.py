@@ -547,18 +547,28 @@ def _read_text(
         lang = "eng"
     best = ""
     best_rank = (-1, -1)
-    for view in _views(image):
-        for psm in (6, 4):
-            try:
-                text = _ocr_image(engine, view, lang, psm)
-            except (OSError, subprocess.TimeoutExpired) as exc:
-                log.error("document OCR pass failed: %s", _short(exc))
-                continue
-            rank = _rank(text, plate, driver_name)
-            if rank > best_rank:
-                best, best_rank = text, rank
-            if rank[0] >= 3:
-                return text
+    # Сначала блок текста справа от портрета. Штрихи лица иначе
+    # прилипают к ФИО, и та же фамилия читается как чужая.
+    passes: list[tuple[bytes, bool]] = [(image, False)]
+    column = _text_column_png(image)
+    if column is not None:
+        passes.insert(0, (column, True))
+    for picture, column_only in passes:
+        for view in _views(picture):
+            for psm in (6, 4):
+                try:
+                    text = _ocr_image(engine, view, lang, psm)
+                except (OSError, subprocess.TimeoutExpired) as exc:
+                    log.error("document OCR pass failed: %s", _short(exc))
+                    continue
+                rank = _rank(text, plate, driver_name)
+                if rank[0] >= 3:
+                    return text
+                # Обрезок без ФИО не должен перебивать полный кадр.
+                if column_only:
+                    continue
+                if rank > best_rank:
+                    best, best_rank = text, rank
     return best
 
 
@@ -613,6 +623,39 @@ def _stderr_line(payload: bytes | None) -> str:
 def _short(exc: BaseException) -> str:
     text = str(exc).splitlines()[0].strip() if str(exc).strip() else ""
     return (text or exc.__class__.__name__)[:200]
+
+
+def _text_column_png(image: bytes) -> bytes | None:
+    """Правая колонка, если слева рисунок и его отделяет пустой промежуток."""
+    array = cv2.imdecode(np.frombuffer(image, dtype=np.uint8), cv2.IMREAD_GRAYSCALE)
+    if array is None or array.size == 0:
+        return None
+    height, width = array.shape[:2]
+    if width < 400 or height < 80:
+        return None
+    ink = array < 170
+    density = ink.mean(axis=0)
+    limit = int(width * 0.55)
+    cursor = int(width * 0.12)
+    gap: tuple[int, int, int] | None = None
+    while cursor < limit:
+        if density[cursor] < 0.012:
+            begin = cursor
+            while cursor < limit and density[cursor] < 0.012:
+                cursor += 1
+            if cursor - begin >= 12 and (gap is None or cursor - begin > gap[0]):
+                gap = (cursor - begin, begin, cursor)
+        else:
+            cursor += 1
+    if gap is None:
+        return None
+    _length, begin, end = gap
+    if float(ink[:, :begin].mean()) < 0.01 or float(ink[:, end:].mean()) < 0.01:
+        return None
+    ok, encoded = cv2.imencode(".png", array[:, end:])
+    if not ok:
+        return None
+    return encoded.tobytes()
 
 
 def _views(image: bytes) -> list[Image.Image]:
