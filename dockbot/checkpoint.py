@@ -22,9 +22,18 @@ from dockbot.models import (
     Booking,
     BookingStatus,
     BookingStatusEvent,
+    Gate,
     StaffRole,
     StatusSource,
 )
+
+OCCUPYING = (
+    BookingStatus.booked,
+    BookingStatus.confirmed,
+    BookingStatus.arrived,
+    BookingStatus.unloading,
+)
+DEPARTURE_NOTE = "выехал"
 from dockbot.qrscan import decode_qr
 
 log = logging.getLogger(__name__)
@@ -95,6 +104,7 @@ def apply_mark(
     booking_id: int,
     target: BookingStatus,
     now: datetime | None = None,
+    gate_id: int | None = None,
 ) -> Trip:
     """Условное обновление: проигравшая транзакция видит уже новый статус.
 
@@ -114,6 +124,23 @@ def apply_mark(
                 raise PassNotFound()
             if NEXT.get(booking.status) != target:
                 raise TransitionRejected()
+            if target is BookingStatus.unloading and gate_id is not None:
+                gate = session.get(Gate, gate_id)
+                if gate is None or not gate.is_active:
+                    raise TransitionRejected()
+                if gate.light_only and booking.vehicle_kind != "light":
+                    raise TransitionRejected()
+                clash = session.scalar(
+                    select(Booking.id).where(
+                        Booking.gate_id == gate_id,
+                        Booking.id != booking.id,
+                        Booking.slot_start == booking.slot_start,
+                        Booking.status.in_(tuple(OCCUPYING)),
+                    )
+                )
+                if clash is not None:
+                    raise TransitionRejected()
+                booking.gate_id = gate_id
             previous = booking.status
             booking.status = target
             setattr(booking, _STAMP[target], moment)
@@ -124,11 +151,49 @@ def apply_mark(
                     to_status=target,
                     source=StatusSource.staff,
                     actor_telegram_id=telegram_id,
+                    created_at=moment,
                 )
             )
             session.flush()
             trip = _trip(session, booking)
     _changed(booking_id)
+    return trip
+
+
+def mark_departed(
+    engine: Engine,
+    telegram_id: int,
+    booking_id: int,
+    now: datetime | None = None,
+) -> Trip:
+    """КПП фиксирует выезд. Статус брони остаётся «Завершено»."""
+    require_staff(engine, telegram_id)
+    moment = now or datetime.now(timezone.utc)
+    if moment.tzinfo is None:
+        raise TransitionRejected()
+    with Session(engine) as session:
+        with session.begin():
+            booking = session.get(Booking, booking_id, with_for_update=True)
+            if booking is None:
+                raise PassNotFound()
+            if booking.status != BookingStatus.completed:
+                raise TransitionRejected()
+            if booking.departed_at is not None:
+                raise TransitionRejected()
+            booking.departed_at = moment
+            session.add(
+                BookingStatusEvent(
+                    booking_id=booking.id,
+                    from_status=BookingStatus.completed,
+                    to_status=BookingStatus.completed,
+                    source=StatusSource.staff,
+                    actor_telegram_id=telegram_id,
+                    note=DEPARTURE_NOTE,
+                    created_at=moment,
+                )
+            )
+            session.flush()
+            trip = _trip(session, booking)
     return trip
 
 

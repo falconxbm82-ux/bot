@@ -22,8 +22,11 @@ from dockbot.booking import (
     clean_cargo,
     clean_driver_name,
     clean_make,
+    booking_profile,
+    cargo_norms,
     create_booking,
     gates_with_slots,
+    window_rules,
     get_owned,
     normalize_plate,
     load_zone,
@@ -49,6 +52,8 @@ from dockbot.bot.ui import (
     cancel_step_markup,
     cargo_markup,
     dates_markup,
+    urgent_markup,
+    vehicle_markup,
     gates_markup,
     menu_markup,
     pass_done_markup,
@@ -72,6 +77,9 @@ _CARGO_LABELS = {
 
 
 class BookFlow(StatesGroup):
+    vehicle = State()
+    cargo_pick = State()
+    urgent = State()
     date = State()
     gate = State()
     slot = State()
@@ -93,7 +101,70 @@ class MoveFlow(StatesGroup):
 @router.callback_query(F.data == BOOK)
 async def begin_booking(query: CallbackQuery, state: FSMContext, engine: Engine) -> None:
     await state.set_data({"mode": "create"})
+    await show_vehicle(query, state, engine)
+
+
+@router.callback_query(BookFlow.vehicle, F.data.startswith("bk:veh:"))
+async def pick_vehicle(query: CallbackQuery, state: FSMContext, engine: Engine) -> None:
+    kind = (query.data or "").removeprefix("bk:veh:")
+    if kind not in {"light", "heavy"}:
+        await query.answer("Кнопка устарела", show_alert=True)
+        return
+    await state.update_data(vehicle=kind)
+    await show_cargo_pick(query, state, engine)
+
+
+@router.callback_query(BookFlow.cargo_pick, F.data.startswith(CARGO_PREFIX))
+async def pick_cargo_first(query: CallbackQuery, state: FSMContext) -> None:
+    code = (query.data or "").removeprefix(CARGO_PREFIX)
+    if code == "other":
+        await state.set_state(BookFlow.cargo_note)
+        await reply(query, "Напишите тип груза.", cancel_step_markup())
+        return
+    label = _CARGO_LABELS.get(code)
+    if label is None:
+        await query.answer("Кнопка устарела", show_alert=True)
+        return
+    await state.update_data(cargo=label)
+    await show_urgent(query, state)
+
+
+@router.callback_query(BookFlow.urgent, F.data.startswith("bk:urgent:"))
+async def pick_urgent(query: CallbackQuery, state: FSMContext, engine: Engine) -> None:
+    raw = (query.data or "").removeprefix("bk:urgent:")
+    if raw not in {"0", "1"}:
+        await query.answer("Кнопка устарела", show_alert=True)
+        return
+    await state.update_data(urgent=raw == "1")
     await show_dates(query, state, engine)
+
+
+async def show_vehicle(
+    event: Message | CallbackQuery, state: FSMContext, engine: Engine
+) -> None:
+    del engine
+    await state.set_state(BookFlow.vehicle)
+    await reply(event, "Вид транспорта.", vehicle_markup())
+
+
+async def show_cargo_pick(
+    event: Message | CallbackQuery, state: FSMContext, engine: Engine
+) -> None:
+    norms = {
+        code: minutes
+        for code, _label, minutes in await asyncio.to_thread(cargo_norms, engine)
+    }
+    await state.set_state(BookFlow.cargo_pick)
+    await reply(
+        event,
+        "Тип груза. Длина окна — у кнопки.",
+        cargo_markup(norms),
+    )
+
+
+async def show_urgent(event: Message | CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(BookFlow.urgent)
+    await reply(event, "Срочность рейса.", urgent_markup())
 
 
 async def begin_move(
@@ -103,7 +174,7 @@ async def begin_move(
     await show_dates(query, state, engine)
 
 
-@router.callback_query(F.data == ABORT)
+@router.callback_query(StateFilter(BookFlow, MoveFlow), F.data == ABORT)
 async def abort(query: CallbackQuery, state: FSMContext) -> None:
     data = await state.get_data()
     await state.clear()
@@ -190,7 +261,7 @@ async def make_step(message: Message, state: FSMContext) -> None:
 
 
 @router.message(BookFlow.driver_name, F.text)
-async def name_step(message: Message, state: FSMContext) -> None:
+async def name_step(message: Message, state: FSMContext, engine: Engine) -> None:
     if await _aborted_text(message, state):
         return
     try:
@@ -199,6 +270,9 @@ async def name_step(message: Message, state: FSMContext) -> None:
         await message.answer(str(exc))
         return
     await state.update_data(driver_name=field.value)
+    if (await state.get_data()).get("cargo"):
+        await show_summary(message, state, engine)
+        return
     await state.set_state(BookFlow.cargo)
     await message.answer("Тип груза.", reply_markup=cargo_markup())
 
@@ -238,7 +312,10 @@ async def cargo_note(message: Message, state: FSMContext, engine: Engine) -> Non
         await message.answer(str(exc))
         return
     await state.update_data(cargo=field.value)
-    await show_summary(message, state, engine)
+    if (await state.get_data()).get("slot_ts"):
+        await show_summary(message, state, engine)
+        return
+    await show_urgent(message, state)
 
 
 @router.callback_query(F.data == CURRENT_SLOT)
@@ -336,6 +413,8 @@ async def confirm(query: CallbackQuery, state: FSMContext, engine: Engine) -> No
                     cargo_type=data["cargo"],
                     telegram_id=telegram_id,
                     chat_id=chat_id,
+                    vehicle=data.get("vehicle") or "heavy",
+                    urgent=bool(data.get("urgent")),
                 )
         except SlotTaken as exc:
             await show_slots(query, state, engine, preface=str(exc))
@@ -379,8 +458,13 @@ async def show_dates(
         await state.update_data(keyboard_hidden=True)
     ignore = int(data["booking_id"]) if moving and data.get("booking_id") else None
     try:
+        cargo, vehicle = await _party(engine, data)
         dates = await asyncio.to_thread(
-            available_dates, engine, ignore_booking_id=ignore
+            available_dates,
+            engine,
+            ignore_booking_id=ignore,
+            cargo=cargo,
+            vehicle=vehicle,
         )
     except SiteNotConfigured as exc:
         await state.clear()
@@ -411,8 +495,14 @@ async def show_gates(
     ignore = int(data["booking_id"]) if moving and data.get("booking_id") else None
     day = date.fromisoformat(data["date"])
     try:
+        cargo, vehicle = await _party(engine, data)
         gates = await asyncio.to_thread(
-            gates_with_slots, engine, day, ignore_booking_id=ignore
+            gates_with_slots,
+            engine,
+            day,
+            ignore_booking_id=ignore,
+            cargo=cargo,
+            vehicle=vehicle,
         )
     except SiteNotConfigured as exc:
         await state.clear()
@@ -528,9 +618,22 @@ async def show_summary(
             cargo_type=cargo,
             zone=zone,
             moving=moving,
+            rules=await asyncio.to_thread(window_rules, engine),
+            vehicle=None if moving else data.get("vehicle"),
+            urgent=bool(data.get("urgent")),
         ),
         summary_markup(moving),
     )
+
+
+async def _party(engine: Engine, data: dict) -> tuple[str | None, str | None]:
+    if data.get("mode") == "move" and data.get("booking_id"):
+        profile = await asyncio.to_thread(
+            booking_profile, engine, int(data["booking_id"])
+        )
+        if profile is not None:
+            return profile
+    return data.get("cargo"), data.get("vehicle")
 
 
 async def _slot_from_state(engine: Engine, data: dict):
@@ -552,12 +655,15 @@ async def _slot_choices(engine: Engine, data: dict):
     ignore = int(data["booking_id"]) if moving and data.get("booking_id") else None
     day = date.fromisoformat(data["date"])
     try:
+        cargo, vehicle = await _party(engine, data)
         choices = await asyncio.to_thread(
             slots_for_gate,
             engine,
             day,
             int(data["gate_id"]),
             ignore_booking_id=ignore,
+            cargo=cargo,
+            vehicle=vehicle,
         )
         zone = await asyncio.to_thread(load_zone, engine)
     except SiteNotConfigured:

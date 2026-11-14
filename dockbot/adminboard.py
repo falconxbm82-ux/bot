@@ -24,6 +24,8 @@ from dockbot.booking import (
 from dockbot.models import (
     Booking,
     BookingStatus,
+    BookingStatusEvent,
+    CargoNorm,
     ClosedSlot,
     Gate,
     GateHour,
@@ -38,6 +40,8 @@ WINDOW_CLOSE = time(20, 0)
 SLOT_MINUTES = 60
 CANCEL_CHOICES = (60, 120, 180, 240)
 LATE_CHOICES = (10, 15, 20, 30)
+BUFFER_CHOICES = (0, 10, 15, 30)
+NORM_CHOICES = (30, 60, 90, 120)
 
 
 class AdminError(Exception):
@@ -50,6 +54,7 @@ class GateRow:
     code: str
     name: str
     is_active: bool
+    light_only: bool = False
 
 
 @dataclass(frozen=True)
@@ -75,6 +80,22 @@ class StandSettings:
     address: str
     latitude: float | None
     longitude: float | None
+    buffer_minutes: int = 0
+
+
+@dataclass(frozen=True)
+class CargoAverage:
+    cargo: str
+    minutes: int
+
+
+@dataclass(frozen=True)
+class DayFacts:
+    counts: list[tuple[BookingStatus, int]]
+    late: int
+    cancelled: int
+    on_time: int
+    averages: list[CargoAverage]
 
 
 def list_gates(engine: Engine, telegram_id: int) -> list[GateRow]:
@@ -82,7 +103,7 @@ def list_gates(engine: Engine, telegram_id: int) -> list[GateRow]:
     with Session(engine) as session:
         rows = session.scalars(select(Gate).order_by(Gate.code, Gate.id)).all()
         return [
-            GateRow(row.id, row.code, row.name, row.is_active) for row in rows
+            GateRow(row.id, row.code, row.name, row.is_active, row.light_only) for row in rows
         ]
 
 
@@ -94,7 +115,7 @@ def toggle_gate(engine: Engine, telegram_id: int, gate_id: int) -> GateRow:
             if gate is None:
                 raise AdminError("Ворота не найдены.")
             gate.is_active = not gate.is_active
-            return GateRow(gate.id, gate.code, gate.name, gate.is_active)
+            return GateRow(gate.id, gate.code, gate.name, gate.is_active, gate.light_only)
 
 
 def add_gate(engine: Engine, telegram_id: int, code: str) -> GateRow:
@@ -110,7 +131,7 @@ def add_gate(engine: Engine, telegram_id: int, code: str) -> GateRow:
             gate = Gate(code=number, name=f"Ворота {number}", is_active=True)
             session.add(gate)
             session.flush()
-            return GateRow(gate.id, gate.code, gate.name, gate.is_active)
+            return GateRow(gate.id, gate.code, gate.name, gate.is_active, gate.light_only)
 
 
 def admin_dates(engine: Engine, telegram_id: int, now: datetime | None = None) -> list[date]:
@@ -309,6 +330,7 @@ def read_settings(engine: Engine, telegram_id: int) -> StandSettings:
             address=(row.address or "").strip(),
             latitude=None if row.latitude is None else float(row.latitude),
             longitude=None if row.longitude is None else float(row.longitude),
+            buffer_minutes=row.buffer_minutes,
         )
 
 
@@ -317,6 +339,36 @@ def set_cancel_minutes(engine: Engine, telegram_id: int, minutes: int) -> None:
     if minutes not in CANCEL_CHOICES:
         raise AdminError("Окно отмены: 60, 120, 180 или 240 минут.")
     _update_settings(engine, cancel_window_hours=minutes // 60)
+
+
+def set_buffer_minutes(engine: Engine, telegram_id: int, minutes: int) -> None:
+    require_role(engine, telegram_id, StaffRole.admin)
+    if minutes not in BUFFER_CHOICES:
+        raise AdminError("Зазор: 0, 10, 15 или 30 минут.")
+    _update_settings(engine, buffer_minutes=minutes)
+
+
+def set_cargo_minutes(engine: Engine, telegram_id: int, code: str, minutes: int) -> None:
+    require_role(engine, telegram_id, StaffRole.admin)
+    if minutes not in NORM_CHOICES:
+        raise AdminError("Норматив: 30, 60, 90 или 120 минут.")
+    with Session(engine) as session:
+        with session.begin():
+            row = session.get(CargoNorm, code)
+            if row is None:
+                raise AdminError("Такого типа груза нет.")
+            row.minutes = minutes
+
+
+def toggle_light_only(engine: Engine, telegram_id: int, gate_id: int) -> GateRow:
+    require_role(engine, telegram_id, StaffRole.admin)
+    with Session(engine) as session:
+        with session.begin():
+            gate = session.get(Gate, gate_id, with_for_update=True)
+            if gate is None:
+                raise AdminError("Ворота не найдены.")
+            gate.light_only = not gate.light_only
+            return GateRow(gate.id, gate.code, gate.name, gate.is_active, gate.light_only)
 
 
 def set_late_minutes(engine: Engine, telegram_id: int, minutes: int) -> None:
@@ -341,7 +393,7 @@ def set_point(engine: Engine, telegram_id: int, latitude: float, longitude: floa
 
 def day_summary(
     engine: Engine, telegram_id: int, now: datetime | None = None
-) -> list[tuple[BookingStatus, int]]:
+) -> DayFacts:
     require_role(engine, telegram_id, StaffRole.admin)
     zone = load_zone(engine)
     moment = now or datetime.now(zone)
@@ -349,13 +401,50 @@ def day_summary(
     start = datetime.combine(day, time.min, tzinfo=zone)
     end = start + timedelta(days=1)
     with Session(engine) as session:
-        rows = session.execute(
-            select(Booking.status, func.count())
-            .where(Booking.slot_start >= start, Booking.slot_start < end)
-            .group_by(Booking.status)
+        site = session.get(SiteSettings, 1)
+        late_after = timedelta(minutes=15 if site is None else site.late_after_minutes)
+        rows = session.scalars(
+            select(Booking).where(Booking.slot_start >= start, Booking.slot_start < end)
         ).all()
-    counts = {status: count for status, count in rows}
-    return [(status, int(counts.get(status, 0))) for status in BookingStatus]
+        ids = [row.id for row in rows]
+        events = []
+        if ids:
+            events = session.scalars(
+                select(BookingStatusEvent)
+                .where(
+                    BookingStatusEvent.booking_id.in_(ids),
+                    BookingStatusEvent.note.is_(None),
+                )
+                .order_by(BookingStatusEvent.id)
+            ).all()
+    counts_map = {status: 0 for status in BookingStatus}
+    for row in rows:
+        counts_map[row.status] += 1
+    moments: dict[tuple[int, BookingStatus], datetime] = {}
+    for event in events:
+        moments[(event.booking_id, event.to_status)] = event.created_at
+    on_time = 0
+    buckets: dict[str, list[int]] = {}
+    for row in rows:
+        arrived = moments.get((row.id, BookingStatus.arrived))
+        if arrived is not None and arrived <= row.slot_start + late_after:
+            on_time += 1
+        done = moments.get((row.id, BookingStatus.completed))
+        if arrived is not None and done is not None and done >= arrived:
+            buckets.setdefault(row.cargo_type, []).append(
+                int((done - arrived).total_seconds() // 60)
+            )
+    averages = [
+        CargoAverage(cargo, int(sum(values) / len(values)))
+        for cargo, values in sorted(buckets.items())
+    ]
+    return DayFacts(
+        counts=[(status, counts_map[status]) for status in BookingStatus],
+        late=counts_map[BookingStatus.late],
+        cancelled=counts_map[BookingStatus.cancelled],
+        on_time=on_time,
+        averages=averages,
+    )
 
 
 def ensure_stand_staff(engine: Engine) -> None:

@@ -11,6 +11,7 @@ from aiogram.types import TelegramObject
 from sqlalchemy.engine import Engine
 
 from dockbot.bot.admin import router as admin_router
+from dockbot.bot.desk import router as desk_router
 from dockbot.bot.driver import router as driver_router
 from dockbot.bot.fallback import router as fallback_router
 from dockbot.bot.mine import router as mine_router
@@ -46,6 +47,7 @@ def build_dispatcher(engine: Engine) -> Dispatcher:
     dispatcher.include_router(wizard_router)
     dispatcher.include_router(mine_router)
     dispatcher.include_router(admin_router)
+    dispatcher.include_router(desk_router)
     dispatcher.include_router(fallback_router)
     return dispatcher
 
