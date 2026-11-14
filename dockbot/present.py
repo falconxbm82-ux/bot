@@ -59,19 +59,29 @@ def summary_text(
     cargo_type: str,
     zone: ZoneInfo,
     moving: bool,
+    rules: str | None = None,
+    vehicle: str | None = None,
+    urgent: bool = False,
 ) -> str:
     date_text, clock = local_parts(start, end, zone)
     title = "Перенос брони." if moving else "Проверьте запись."
-    return (
-        f"{title}\n"
-        f"Дата: {date_text}\n"
-        f"Время: {clock}\n"
-        f"Ворота: {gate_label(gate_code)}\n"
-        f"Госномер: {plate}\n"
-        f"Марка: {make}\n"
-        f"ФИО: {driver_name}\n"
-        f"Груз: {cargo_type}"
-    )
+    lines = [
+        title,
+        f"Дата: {date_text}",
+        f"Время: {clock}",
+        f"Ворота: {gate_label(gate_code)}",
+        f"Госномер: {plate}",
+        f"Марка: {make}",
+        f"ФИО: {driver_name}",
+        f"Груз: {cargo_type}",
+    ]
+    if vehicle:
+        lines.append("Транспорт: малотоннажный" if vehicle == "light" else "Транспорт: обычный")
+    if urgent:
+        lines.append("Рейс: срочный")
+    if rules:
+        lines.append(rules)
+    return "\n".join(lines)
 
 
 def card_text(trip: Trip, zone: ZoneInfo, block: str | None) -> str:

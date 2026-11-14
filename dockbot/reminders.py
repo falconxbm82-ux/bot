@@ -271,6 +271,9 @@ def _prepare(
             if gate is None:
                 return None
             recorded_lateness = False
+            no_chat = booking.driver_chat_id is None
+            if no_chat and kind is not NotificationKind.late:
+                return None
             if kind is NotificationKind.late:
                 if booking.status in _OPEN:
                     previous = booking.status
@@ -323,6 +326,8 @@ def _prepare(
                     zone,
                     kind,
                 )
+            if no_chat:
+                return None
             return _Prepared(
                 chat_id=booking.driver_chat_id,
                 text=text,

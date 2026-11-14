@@ -37,16 +37,16 @@ from dockbot.checkpoint import (
     apply_mark,
     find_pass,
     load_trip,
+    mark_departed,
     read_pass_image,
 )
 from dockbot.models import BookingStatus, StaffRole
 from dockbot.present import card_text
 from dockbot.shiftboard import (
     ShiftPage,
-    checkpoint_actions,
+    actions_for,
     filter_shift,
     load_shift,
-    row_actions,
     shift_pages,
     trip_line,
 )
@@ -331,8 +331,15 @@ async def _mark(
         await _reply(query, NOT_FOUND)
         return
     try:
+        gate_id = _second_id(query.data or "", prefix)
         trip = await asyncio.to_thread(
-            apply_mark, engine, user.id, booking_id, target
+            apply_mark,
+            engine,
+            user.id,
+            booking_id,
+            target,
+            None,
+            gate_id,
         )
     except AccessDenied:
         await state.clear()
@@ -352,22 +359,28 @@ async def _mark(
             if trip.status == target
             else "Этот переход недоступен. Выберите следующий шаг на карточке."
         )
-        await _reply(query, f"{note}\n\n{text}", _markup(trip, card))
+        await _reply(
+            query, f"{note}\n\n{text}", _markup(engine, trip, _staff_role(engine, user.id))
+        )
         return
     text = await asyncio.to_thread(_body, engine, trip, card)
-    await _reply(query, text, _markup(trip, card))
+    await _reply(query, text, _markup(engine, trip, _staff_role(engine, user.id)))
 
 
 async def _show_checkpoint(message: Message, engine: Engine, trip: Trip) -> None:
     zone_text = await asyncio.to_thread(_card, engine, trip)
-    await message.answer(zone_text, reply_markup=_markup(trip, True))
+    user = message.from_user
+    role = _staff_role(engine, None if user is None else user.id)
+    await message.answer(zone_text, reply_markup=_markup(engine, trip, role))
 
 
 async def _show_row(
     query: CallbackQuery, engine: Engine, trip: Trip
 ) -> None:
     text = await asyncio.to_thread(_card, engine, trip)
-    await _reply(query, text, _markup(trip, False))
+    user = query.from_user
+    role = _staff_role(engine, None if user is None else user.id)
+    await _reply(query, text, _markup(engine, trip, role))
 
 
 async def _send_shift(query: CallbackQuery, engine: Engine, mode: str) -> None:
@@ -411,16 +424,37 @@ def _body(engine: Engine, trip: Trip, card: bool) -> str:
 def _card(engine: Engine, trip: Trip) -> str:
     from dockbot.booking import load_zone
 
-    return "Пропуск\n" + card_text(trip, load_zone(engine), None)
+    text = "Пропуск\n" + card_text(trip, load_zone(engine), None)
+    if trip.no_driver_chat:
+        text += "\nНапоминания не уйдут: у рейса нет чата водителя."
+    if trip.departed:
+        text += "\nВыезд с территории отмечен."
+    if (
+        trip.status == BookingStatus.arrived
+        and not actions_for(engine, trip, StaffRole.warehouse)
+        and not actions_for(engine, trip, StaffRole.admin)
+    ):
+        text += "\nНет ворот для этого транспорта."
+    return text
 
 
-def _markup(trip: Trip, card: bool) -> InlineKeyboardMarkup | None:
-    actions = (*checkpoint_actions(trip), *row_actions(trip))
+def _markup(engine: Engine, trip: Trip, role: StaffRole) -> InlineKeyboardMarkup | None:
+    actions = actions_for(engine, trip, role)
     rows = [
         [InlineKeyboardButton(text=action.label, callback_data=action.callback)]
         for action in actions
     ]
-    if card or not rows:
+    if trip.no_driver_chat and role in {StaffRole.security, StaffRole.admin}:
+        rows.insert(
+            0,
+            [
+                InlineKeyboardButton(
+                    text="Показать пропуск",
+                    callback_data=f"st:pass:{trip.id}",
+                )
+            ],
+        )
+    if True:
         rows.append(
             [
                 InlineKeyboardButton(text="К списку", callback_data=SHIFT),
@@ -648,6 +682,78 @@ async def _reply(
         return
     if query.from_user is not None:
         await query.bot.send_message(query.from_user.id, text, reply_markup=markup)
+
+
+@router.callback_query(F.data.startswith("st:out:"))
+async def mark_exit(query: CallbackQuery, state: FSMContext, engine: Engine) -> None:
+    if not await _guard(query, state, engine):
+        return
+    booking_id = _id(query.data, "st:out:")
+    user = query.from_user
+    if booking_id is None or user is None:
+        await _reply(query, NOT_FOUND)
+        return
+    try:
+        trip = await asyncio.to_thread(mark_departed, engine, user.id, booking_id)
+    except AccessDenied:
+        await _reply(query, DENIED)
+        return
+    except PassNotFound:
+        await _reply(query, NOT_FOUND)
+        return
+    except TransitionRejected:
+        await _reply(query, "Выезд уже отмечен или рейс ещё не завершён.")
+        return
+    text = await asyncio.to_thread(_card, engine, trip)
+    await _reply(query, text, _markup(engine, trip, _staff_role(engine, user.id)))
+
+
+@router.callback_query(F.data.startswith("st:pass:"))
+async def show_desk_pass(query: CallbackQuery, state: FSMContext, engine: Engine) -> None:
+    if not await _guard(query, state, engine):
+        return
+    booking_id = _id(query.data, "st:pass:")
+    user = query.from_user
+    if booking_id is None or user is None:
+        await _reply(query, NOT_FOUND)
+        return
+    trip = await asyncio.to_thread(load_trip, engine, user.id, booking_id)
+    if trip is None or not trip.no_driver_chat:
+        await _reply(query, NOT_FOUND)
+        return
+    from aiogram.types import BufferedInputFile
+
+    from dockbot.booking import load_zone
+    from dockbot.passes import qr_png
+    from dockbot.present import pass_caption
+
+    zone = await asyncio.to_thread(load_zone, engine)
+    message = query.message
+    await query.answer()
+    if message is None or not hasattr(message, "answer_photo"):
+        return
+    await message.answer_photo(
+        BufferedInputFile(qr_png(trip.pass_token), filename="pass.png"),
+        caption=pass_caption(trip, zone) + "\nНапоминания не уйдут: у рейса нет чата водителя.",
+    )
+
+
+def _staff_role(engine: Engine, telegram_id: int | None) -> StaffRole:
+    if telegram_id is None:
+        return StaffRole.security
+    person = active_staff(engine, telegram_id)
+    if person is None:
+        return StaffRole.security
+    return person.role
+
+
+def _second_id(data: str, prefix: str) -> int | None:
+    if not data.startswith(prefix):
+        return None
+    parts = data[len(prefix) :].split(":")
+    if len(parts) < 2 or not parts[1].isdigit():
+        return None
+    return int(parts[1])
 
 
 def _id(data: str | None, prefix: str) -> int | None:

@@ -20,8 +20,10 @@ from sqlalchemy.engine import Engine
 
 from dockbot.access import AccessDenied
 from dockbot.adminboard import (
+    BUFFER_CHOICES,
     CANCEL_CHOICES,
     LATE_CHOICES,
+    NORM_CHOICES,
     AdminError,
     add_gate,
     admin_dates,
@@ -35,12 +37,16 @@ from dockbot.adminboard import (
     replace_pin,
     revoke_staff,
     set_address,
+    set_buffer_minutes,
     set_cancel_minutes,
+    set_cargo_minutes,
     set_late_minutes,
     set_point,
     set_slot_closed,
     toggle_gate,
+    toggle_light_only,
 )
+from dockbot.booking import cargo_norms
 from dockbot.bot.keyboard import keyboard_for
 from dockbot.bot.ui import MENU, menu_markup
 from dockbot.models import StaffRole
@@ -164,6 +170,84 @@ async def flip_gate(query: CallbackQuery, engine: Engine) -> None:
     state_text = "вкл" if gate.is_active else "выкл"
     gates = await asyncio.to_thread(list_gates, engine, user_id)
     await _answer(query, f"Ворота {gate.code} · {state_text}.", _gates_markup(gates))
+
+
+@router.callback_query(F.data.startswith("ad:gate-light:"))
+async def flip_light(query: CallbackQuery, engine: Engine) -> None:
+    user_id = _user_id(query)
+    raw = (query.data or "").removeprefix("ad:gate-light:")
+    if user_id is None or not raw.isdigit():
+        await query.answer("Кнопка устарела", show_alert=True)
+        return
+    try:
+        gate = await asyncio.to_thread(toggle_light_only, engine, user_id, int(raw))
+    except AccessDenied:
+        await query.answer(RIGHTS, show_alert=True)
+        return
+    except AdminError as exc:
+        await query.answer(str(exc), show_alert=True)
+        return
+    gates = await asyncio.to_thread(list_gates, engine, user_id)
+    mark = "только малотоннажные" if gate.light_only else "все машины"
+    await _answer(query, f"Ворота {gate.code}: {mark}.", _gates_markup(gates))
+
+
+@router.callback_query(F.data.startswith("ad:buffer:"))
+async def save_buffer(query: CallbackQuery, engine: Engine) -> None:
+    await _save_number(query, engine, "ad:buffer:", set_buffer_minutes, "Зазор сохранён.")
+
+
+@router.callback_query(F.data == "ad:norms")
+async def show_norms(query: CallbackQuery, engine: Engine) -> None:
+    if not await _admin(query, engine):
+        return
+    norms = await asyncio.to_thread(cargo_norms, engine)
+    rows = []
+    for code, label, minutes in norms:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=f"{label} · {choice} мин",
+                    callback_data=f"ad:norm:{code}:{choice}",
+                )
+                for choice in NORM_CHOICES[:2]
+            ]
+        )
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=f"{label} · {choice}",
+                    callback_data=f"ad:norm:{code}:{choice}",
+                )
+                for choice in NORM_CHOICES[2:]
+            ]
+        )
+    rows.append([InlineKeyboardButton(text="«« Назад", callback_data="ad:settings")])
+    rows.append([InlineKeyboardButton(text="В меню", callback_data=MENU)])
+    await _answer(
+        query,
+        "Норматив разгрузки по типу груза. Свободные окна мастера станут этой длины.",
+        InlineKeyboardMarkup(inline_keyboard=rows),
+    )
+
+
+@router.callback_query(F.data.startswith("ad:norm:"))
+async def save_norm(query: CallbackQuery, engine: Engine) -> None:
+    user_id = _user_id(query)
+    rest = (query.data or "").removeprefix("ad:norm:")
+    code, _, raw = rest.partition(":")
+    if user_id is None or not raw.isdigit():
+        await query.answer("Кнопка устарела", show_alert=True)
+        return
+    try:
+        await asyncio.to_thread(set_cargo_minutes, engine, user_id, code, int(raw))
+    except AccessDenied:
+        await query.answer(RIGHTS, show_alert=True)
+        return
+    except AdminError as exc:
+        await query.answer(str(exc), show_alert=True)
+        return
+    await show_norms(query, engine)
 
 
 @router.callback_query(F.data == "ad:slots")
@@ -493,15 +577,25 @@ async def day_again(query: CallbackQuery, engine: Engine) -> None:
 
 
 def _gates_markup(gates: list) -> InlineKeyboardMarkup:
-    rows = [
-        [
-            InlineKeyboardButton(
-                text=f"Ворота {gate.code} · {'вкл' if gate.is_active else 'выкл'}",
-                callback_data=f"ad:gate-toggle:{gate.id}",
-            )
-        ]
-        for gate in gates
-    ]
+    rows = []
+    for gate in gates:
+        light = "малотоннажные" if gate.light_only else "все машины"
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=f"Ворота {gate.code} · {'вкл' if gate.is_active else 'выкл'}",
+                    callback_data=f"ad:gate-toggle:{gate.id}",
+                )
+            ]
+        )
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=f"Ворота {gate.code}: {light}",
+                    callback_data=f"ad:gate-light:{gate.id}",
+                )
+            ]
+        )
     rows.append(
         [InlineKeyboardButton(text="Добавить ворота", callback_data="ad:gate-add")]
     )
@@ -675,6 +769,7 @@ async def _show_settings(event: Message | CallbackQuery, engine: Engine) -> None
     text = (
         f"Окно отмены: {current.cancel_minutes} мин\n"
         f"Опоздание: {current.late_minutes} мин\n"
+        f"Зазор между машинами: {current.buffer_minutes} мин\n"
         f"Адрес: {address}\n"
         f"Точка: {point}\n"
         "Напоминания 24 ч, 2 ч и 30 мин не меняются кнопками."
@@ -696,6 +791,11 @@ async def _show_settings(event: Message | CallbackQuery, engine: Engine) -> None
             InlineKeyboardButton(text=f"опоздание {minutes}", callback_data=f"ad:late:{minutes}")
             for minutes in LATE_CHOICES[2:]
         ],
+        [
+            InlineKeyboardButton(text=f"зазор {minutes}", callback_data=f"ad:buffer:{minutes}")
+            for minutes in BUFFER_CHOICES
+        ],
+        [InlineKeyboardButton(text="Нормативы груза", callback_data="ad:norms")],
         [InlineKeyboardButton(text="Изменить адрес", callback_data="ad:address")],
         [InlineKeyboardButton(text="Отправить геопозицию", callback_data="ad:point")],
         [InlineKeyboardButton(text="В меню", callback_data=MENU)],
@@ -716,10 +816,19 @@ async def _show_day(event: Message | CallbackQuery, engine: Engine) -> None:
         await _tell(event, str(exc))
         return
     lines = ["Сводка дня."]
-    lines.extend(f"{STATUS_LABELS[status]}: {count}" for status, count in counts)
+    lines.extend(f"{STATUS_LABELS[status]}: {count}" for status, count in counts.counts)
+    lines.append(f"Опоздали: {counts.late}")
+    lines.append(f"Отменены: {counts.cancelled}")
+    lines.append(f"Прибыли в срок: {counts.on_time}")
+    if counts.averages:
+        lines.append("Среднее от прибытия до разгрузки:")
+        lines.extend(f"{item.cargo}: {item.minutes} мин" for item in counts.averages)
+    else:
+        lines.append("Завершённых разгрузок сегодня нет. Обновите сводку после «Разгружен».")
     markup = InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="Обновить", callback_data="ad:day")],
+            [InlineKeyboardButton(text="Записать без чата", callback_data="ad:desk")],
             [InlineKeyboardButton(text="В меню", callback_data=MENU)],
         ]
     )

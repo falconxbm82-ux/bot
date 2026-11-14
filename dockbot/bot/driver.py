@@ -44,7 +44,12 @@ async def show_help(message: Message, engine: Engine) -> None:
     if user is not None:
         person = await asyncio.to_thread(active_staff, engine, user.id)
     role = None if person is None else person.role
-    await message.answer(help_text(role), reply_markup=await _menu(message, engine))
+    text = help_text(role)
+    if role is None:
+        from dockbot.booking import window_rules
+
+        text = f"{text}\n{await asyncio.to_thread(window_rules, engine)}"
+    await message.answer(text, reply_markup=await _menu(message, engine))
 
 
 @router.callback_query(F.data == NAV_MENU)
