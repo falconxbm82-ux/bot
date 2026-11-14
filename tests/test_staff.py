@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import os
 import threading
 import unittest
@@ -41,6 +42,7 @@ from dockbot.adminboard import (  # noqa: E402
     list_gates,
     set_cargo_minutes,
     set_slot_closed,
+    set_weight_step,
     toggle_light_only,
 )
 from dockbot.access import (  # noqa: E402
@@ -55,10 +57,15 @@ from dockbot.access import (  # noqa: E402
 )
 from dockbot.booking import (  # noqa: E402
     BookingNotFound,
+    FieldError,
     NotEditable,
     SlotTaken,
     Trip,
+    bind_document,
+    confirm_document,
     create_booking,
+    unload_minutes,
+    window_phrase,
     list_live,
     queue_note,
     slots_for_gate,
@@ -73,6 +80,7 @@ from dockbot.checkpoint import (  # noqa: E402
     find_pass,
     mark_departed,
     read_pass_image,
+    refuse_entry,
 )
 from dockbot.config import ConfigError, parse_staff_list  # noqa: E402
 from dockbot.configure import apply_staff  # noqa: E402
@@ -91,7 +99,9 @@ from dockbot.models import (  # noqa: E402
     StaffUser,
     StatusSource,
 )
+from dockbot.documents import discard_document, document_path, judge  # noqa: E402
 from dockbot.passes import new_token, qr_png  # noqa: E402
+from dockbot.present import card_text  # noqa: E402
 from dockbot.qrscan import decode_qr  # noqa: E402
 from dockbot.shiftboard import (  # noqa: E402
     actions_for,
@@ -99,6 +109,7 @@ from dockbot.shiftboard import (  # noqa: E402
     load_shift,
     row_actions,
     shift_pages,
+    trip_line,
 )
 
 ZONE = ZoneInfo("Europe/Moscow")
@@ -1229,6 +1240,193 @@ class StaffTests(unittest.TestCase):
             self.assertIsNone(row.driver_chat_id)
             self.assertIsNone(row.driver_telegram_id)
 
+    def test_weight_extends_the_window_up_to_the_cap(self) -> None:
+        self.assertEqual(unload_minutes(60, 5000, 5000), 60)
+        self.assertEqual(unload_minutes(60, 6000, 5000), 75)
+        self.assertEqual(unload_minutes(60, 40000, 1000), 240)
+        self._staff(pin="3333", telegram_id=STAFF_TG, name="Администратор", role=StaffRole.admin)
+        phrase = window_phrase(ENGINE, "Паллеты", 6000)
+        self.assertIn("Окно 75 мин", phrase)
+        self.assertIn("норма 60", phrase)
+        self.assertIn("Потолок 240", phrase)
+        heavy = create_booking(
+            ENGINE,
+            gate_id=self.gate_a,
+            slot_start=_at(TOMORROW, 8),
+            plate="A100AA77",
+            make="КАМАЗ",
+            driver_name="Иванов",
+            cargo_type="Паллеты",
+            telegram_id=DRIVER,
+            chat_id=DRIVER,
+            now=NOW,
+            weight_kg=6000,
+        )
+        self.assertEqual(heavy.weight_kg, 6000)
+        self.assertEqual(heavy.slot_end - heavy.slot_start, timedelta(minutes=75))
+        offered = slots_for_gate(
+            ENGINE, TOMORROW, self.gate_a, now=NOW, cargo="Паллеты", weight_kg=6000
+        )
+        self.assertNotIn(_at(TOMORROW, 9), [slot.start for slot in offered])
+        light = create_booking(
+            ENGINE,
+            gate_id=self.gate_a,
+            slot_start=_at(TOMORROW, 10),
+            plate="B200BB77",
+            make="ГАЗ",
+            driver_name="Иванов",
+            cargo_type="Паллеты",
+            telegram_id=DRIVER + 3,
+            chat_id=DRIVER + 3,
+            now=NOW,
+            weight_kg=1000,
+        )
+        self.assertEqual(light.slot_end - light.slot_start, timedelta(minutes=60))
+        neighbour = slots_for_gate(
+            ENGINE, TOMORROW, self.gate_a, now=NOW, cargo="Паллеты", weight_kg=1000
+        )
+        self.assertIn(_at(TOMORROW, 11), [slot.start for slot in neighbour])
+        set_weight_step(ENGINE, STAFF_TG, 1000)
+        capped = create_booking(
+            ENGINE,
+            gate_id=self.gate_b,
+            slot_start=_at(TOMORROW, 8),
+            plate="C300CC77",
+            make="КАМАЗ",
+            driver_name="Иванов",
+            cargo_type="Паллеты",
+            telegram_id=DRIVER + 5,
+            chat_id=DRIVER + 5,
+            now=NOW,
+            weight_kg=40000,
+        )
+        self.assertEqual(capped.slot_end - capped.slot_start, timedelta(minutes=240))
+        line = trip_line(heavy, ZONE)
+        card = card_text(heavy, ZONE, None)
+        self.assertIn("Паллеты", line)
+        self.assertIn("6 т", line)
+        self.assertIn("75 мин", line)
+        self.assertIn("Паллеты, 6 т, 75 мин", card)
+
+    def test_document_check_stores_photo_and_guard_can_refuse(self) -> None:
+        self._staff(pin="1111", telegram_id=STAFF_TG)
+        self._warehouse()
+        trip = self._book(TOMORROW, 10)
+        self.assertEqual(
+            judge("A123BC178 Иванов Иван", "А123ВС178", "Иванов Иван").verdict,
+            "match",
+        )
+        self.assertFalse(judge("Складской талон", "А123ВС178", "Иванов Иван").confident)
+        self.assertEqual(
+            judge("А777АА77 Петров", "А123ВС178", "Иванов Иван").verdict,
+            "mismatch",
+        )
+        with self.assertRaises(FieldError):
+            bind_document(
+                ENGINE,
+                telegram_id=DRIVER,
+                chat_id=DRIVER,
+                booking_id=trip.id,
+                file_id="file-1",
+                image=b"",
+            )
+        with self.assertRaises(FieldError):
+            bind_document(
+                ENGINE,
+                telegram_id=DRIVER,
+                chat_id=DRIVER,
+                booking_id=trip.id,
+                file_id="file-1",
+                image=_blank_png(),
+            )
+        with self.assertRaises(BookingNotFound):
+            bind_document(
+                ENGINE,
+                telegram_id=OTHER_TG,
+                chat_id=OTHER_TG,
+                booking_id=trip.id,
+                file_id="file-foreign",
+                image=_paper("А123ВС178", "Иванов Иван"),
+            )
+        with Session(ENGINE) as session:
+            row = session.get(Booking, trip.id)
+            assert row is not None
+            self.assertIsNone(row.doc_name)
+        names: list[str] = []
+        try:
+            unsure = bind_document(
+                ENGINE,
+                telegram_id=DRIVER,
+                chat_id=DRIVER,
+                booking_id=trip.id,
+                file_id="file-unsure",
+                image=_paper("Складской талон"),
+            )
+            names.append(unsure.trip.doc_name or "")
+            self.assertFalse(unsure.confident)
+            self.assertIsNone(unsure.trip.doc_result)
+            path = document_path(unsure.trip.doc_name)
+            assert path is not None
+            self.assertGreater(path.stat().st_size, 0)
+            closed = confirm_document(
+                ENGINE,
+                telegram_id=DRIVER,
+                chat_id=DRIVER,
+                booking_id=trip.id,
+                verdict="mismatch",
+            )
+            self.assertEqual(closed.doc_result, "mismatch")
+            with self.assertRaises(AccessDenied):
+                refuse_entry(ENGINE, WAREHOUSE_TG, trip.id, now=NOW)
+            self.assertEqual(self._status(trip.id), BookingStatus.booked)
+            labels = [item.label for item in actions_for(ENGINE, closed, StaffRole.warehouse)]
+            self.assertNotIn("Не пустить", labels)
+            self.assertFalse(any("Фото" in label for label in labels))
+            guard = [item.label for item in actions_for(ENGINE, closed, StaffRole.security)]
+            self.assertIn("Не пустить", guard)
+            refused = refuse_entry(ENGINE, STAFF_TG, trip.id, now=NOW)
+            self.assertEqual(refused.status, BookingStatus.cancelled)
+            with Session(ENGINE) as session:
+                note = session.scalar(
+                    select(BookingStatusEvent.note).where(
+                        BookingStatusEvent.booking_id == trip.id,
+                        BookingStatusEvent.note == "не пустили",
+                    )
+                )
+            self.assertEqual(note, "не пустили")
+            other = create_booking(
+                ENGINE,
+                gate_id=self.gate_a,
+                slot_start=_at(TOMORROW, 11),
+                plate="А123ВС178",
+                make="КАМАЗ",
+                driver_name="Иванов Иван",
+                cargo_type="Паллеты",
+                telegram_id=DRIVER + 6,
+                chat_id=DRIVER + 6,
+                now=NOW,
+            )
+            matched = bind_document(
+                ENGINE,
+                telegram_id=DRIVER + 6,
+                chat_id=DRIVER + 6,
+                booking_id=other.id,
+                file_id="file-match",
+                image=_paper("А123ВС178", "Иванов Иван"),
+            )
+            names.append(matched.trip.doc_name or "")
+            self.assertEqual(matched.verdict, "match")
+            self.assertTrue(matched.confident)
+            with self.assertRaises(TransitionRejected):
+                refuse_entry(ENGINE, STAFF_TG, other.id, now=NOW)
+            card = card_text(matched.trip, ZONE, None, "always")
+            self.assertIn("Документ: сходится", card)
+            hidden = card_text(matched.trip, ZONE, None, "never")
+            self.assertNotIn("Документ", hidden)
+        finally:
+            for name in names:
+                discard_document(name)
+
     def _wipe(self) -> None:
         with Session(ENGINE) as session:
             with session.begin():
@@ -1245,6 +1443,21 @@ class StaffTests(unittest.TestCase):
 def _at(day, hour: int, gate: str = "1") -> datetime:
     del gate
     return datetime(day.year, day.month, day.day, hour, 0, tzinfo=ZONE)
+
+
+def _paper(*lines: str) -> bytes:
+    from PIL import Image, ImageDraw, ImageFont
+
+    font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 48)
+    image = Image.new("RGB", (1100, 320), "white")
+    draw = ImageDraw.Draw(image)
+    y = 36
+    for line in lines:
+        draw.text((28, y), line, fill="black", font=font)
+        y += 100
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    return buffer.getvalue()
 
 
 def _blank_png() -> bytes:

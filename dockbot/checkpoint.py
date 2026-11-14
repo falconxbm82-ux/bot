@@ -15,7 +15,7 @@ from sqlalchemy import select
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
-from dockbot.access import require_role, require_staff
+from dockbot.access import AccessDenied, require_role, require_staff
 from dockbot.booking import Trip, _changed, _trip
 from dockbot.models import (
     TERMINAL_STATUSES,
@@ -34,6 +34,7 @@ OCCUPYING = (
     BookingStatus.unloading,
 )
 DEPARTURE_NOTE = "выехал"
+REFUSE_NOTE = "не пустили"
 from dockbot.qrscan import decode_qr
 
 log = logging.getLogger(__name__)
@@ -194,6 +195,48 @@ def mark_departed(
             )
             session.flush()
             trip = _trip(session, booking)
+    return trip
+
+
+def refuse_entry(
+    engine: Engine,
+    telegram_id: int,
+    booking_id: int,
+    now: datetime | None = None,
+) -> Trip:
+    """Охрана не пускает рейс, если сверка документа — расхождение."""
+    person = require_staff(engine, telegram_id)
+    if person.role not in {StaffRole.security, StaffRole.admin}:
+        raise AccessDenied()
+    moment = now or datetime.now(timezone.utc)
+    if moment.tzinfo is None:
+        raise TransitionRejected()
+    with Session(engine) as session:
+        with session.begin():
+            booking = session.get(Booking, booking_id, with_for_update=True)
+            if booking is None:
+                raise PassNotFound()
+            if booking.doc_result != "mismatch":
+                raise TransitionRejected()
+            if booking.status not in {BookingStatus.booked, BookingStatus.confirmed}:
+                raise TransitionRejected()
+            previous = booking.status
+            booking.status = BookingStatus.cancelled
+            booking.cancelled_at = moment
+            session.add(
+                BookingStatusEvent(
+                    booking_id=booking.id,
+                    from_status=previous,
+                    to_status=BookingStatus.cancelled,
+                    source=StatusSource.staff,
+                    actor_telegram_id=telegram_id,
+                    note=REFUSE_NOTE,
+                    created_at=moment,
+                )
+            )
+            session.flush()
+            trip = _trip(session, booking)
+    _changed(booking_id)
     return trip
 
 

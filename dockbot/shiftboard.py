@@ -14,7 +14,7 @@ from dockbot.access import require_staff
 from dockbot.booking import Trip, _trip, load_zone
 from dockbot.checkpoint import allowed_next
 from dockbot.models import Booking, BookingStatus, BookingStatusEvent, Gate, StaffRole
-from dockbot.present import STATUS_LABELS, gate_label, local_parts
+from dockbot.present import STATUS_LABELS, cargo_detail, gate_label, local_parts
 
 MESSAGE_LIMIT = 3500
 
@@ -52,15 +52,20 @@ def row_actions(trip: Trip) -> tuple[ShiftAction, ...]:
 
 def trip_line(trip: Trip, zone: ZoneInfo) -> str:
     _date_text, clock = local_parts(trip.slot_start, trip.slot_end, zone)
+    detail = cargo_detail(
+        trip.cargo_type, trip.weight_kg, trip.slot_start, trip.slot_end
+    )
     line = (
         f"{clock} {gate_label(trip.gate_code)} {trip.plate} "
-        f"{trip.driver_name} · {trip.cargo_type} — {STATUS_LABELS[trip.status]}"
+        f"{trip.driver_name} · {detail} — {STATUS_LABELS[trip.status]}"
     )
     marks: list[str] = []
     if trip.urgent:
         marks.append("срочно")
     if trip.wait_minutes is not None:
-        marks.append("меньше минуты" if trip.wait_minutes == 0 else f"{trip.wait_minutes} мин")
+        marks.append(
+            "ждёт меньше минуты" if trip.wait_minutes == 0 else f"ждёт {trip.wait_minutes} мин"
+        )
     if trip.overrun:
         marks.append("дольше окна")
     if marks:
@@ -80,6 +85,14 @@ def actions_for(
     if role in {StaffRole.warehouse, StaffRole.admin}:
         actions.extend(_gate_actions(engine, trip))
         actions.extend(row_actions(trip) if trip.status == BookingStatus.unloading else ())
+    if (
+        role in {StaffRole.security, StaffRole.admin}
+        and trip.doc_result == "mismatch"
+        and trip.status in {BookingStatus.booked, BookingStatus.confirmed}
+    ):
+        actions.append(
+            ShiftAction(BookingStatus.cancelled, "Не пустить", f"st:deny:{trip.id}")
+        )
     if (
         role in {StaffRole.security, StaffRole.admin}
         and trip.status == BookingStatus.completed

@@ -42,6 +42,7 @@ CANCEL_CHOICES = (60, 120, 180, 240)
 LATE_CHOICES = (10, 15, 20, 30)
 BUFFER_CHOICES = (0, 10, 15, 30)
 NORM_CHOICES = (30, 60, 90, 120)
+WEIGHT_STEP_CHOICES = (1000, 2000, 5000, 10000)
 
 
 class AdminError(Exception):
@@ -81,6 +82,7 @@ class StandSettings:
     latitude: float | None
     longitude: float | None
     buffer_minutes: int = 0
+    weight_step_kg: int = 5000
 
 
 @dataclass(frozen=True)
@@ -331,6 +333,7 @@ def read_settings(engine: Engine, telegram_id: int) -> StandSettings:
             latitude=None if row.latitude is None else float(row.latitude),
             longitude=None if row.longitude is None else float(row.longitude),
             buffer_minutes=row.buffer_minutes,
+            weight_step_kg=row.weight_step_kg,
         )
 
 
@@ -346,6 +349,13 @@ def set_buffer_minutes(engine: Engine, telegram_id: int, minutes: int) -> None:
     if minutes not in BUFFER_CHOICES:
         raise AdminError("Зазор: 0, 10, 15 или 30 минут.")
     _update_settings(engine, buffer_minutes=minutes)
+
+
+def set_weight_step(engine: Engine, telegram_id: int, kilograms: int) -> None:
+    require_role(engine, telegram_id, StaffRole.admin)
+    if kilograms not in WEIGHT_STEP_CHOICES:
+        raise AdminError("Шаг веса: 1, 2, 5 или 10 т.")
+    _update_settings(engine, weight_step_kg=kilograms)
 
 
 def set_cargo_minutes(engine: Engine, telegram_id: int, code: str, minutes: int) -> None:

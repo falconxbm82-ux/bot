@@ -14,6 +14,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
     CallbackQuery,
+    FSInputFile,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     Message,
@@ -39,7 +40,9 @@ from dockbot.checkpoint import (
     load_trip,
     mark_departed,
     read_pass_image,
+    refuse_entry,
 )
+from dockbot.documents import document_path
 from dockbot.models import BookingStatus, StaffRole
 from dockbot.present import card_text
 from dockbot.shiftboard import (
@@ -353,7 +356,7 @@ async def _mark(
         if trip is None:
             await _reply(query, REJECTED)
             return
-        text = await asyncio.to_thread(_body, engine, trip, card)
+        text = await asyncio.to_thread(_body, engine, trip, card, _staff_role(engine, user.id))
         note = (
             "Статус уже установлен."
             if trip.status == target
@@ -363,24 +366,27 @@ async def _mark(
             query, f"{note}\n\n{text}", _markup(engine, trip, _staff_role(engine, user.id))
         )
         return
-    text = await asyncio.to_thread(_body, engine, trip, card)
+    text = await asyncio.to_thread(_body, engine, trip, card, _staff_role(engine, user.id))
     await _reply(query, text, _markup(engine, trip, _staff_role(engine, user.id)))
 
 
 async def _show_checkpoint(message: Message, engine: Engine, trip: Trip) -> None:
-    zone_text = await asyncio.to_thread(_card, engine, trip)
     user = message.from_user
     role = _staff_role(engine, None if user is None else user.id)
+    zone_text = await asyncio.to_thread(_card, engine, trip, role)
     await message.answer(zone_text, reply_markup=_markup(engine, trip, role))
+    await _send_document(message, trip, role)
 
 
 async def _show_row(
     query: CallbackQuery, engine: Engine, trip: Trip
 ) -> None:
-    text = await asyncio.to_thread(_card, engine, trip)
     user = query.from_user
     role = _staff_role(engine, None if user is None else user.id)
+    text = await asyncio.to_thread(_card, engine, trip, role)
     await _reply(query, text, _markup(engine, trip, role))
+    if query.message is not None:
+        await _send_document(query.message, trip, role)
 
 
 async def _send_shift(query: CallbackQuery, engine: Engine, mode: str) -> None:
@@ -413,18 +419,19 @@ async def _send_shift(query: CallbackQuery, engine: Engine, mode: str) -> None:
     await _deliver(query, pages, zone, mode, answered=True)
 
 
-def _body(engine: Engine, trip: Trip, card: bool) -> str:
+def _body(engine: Engine, trip: Trip, card: bool, role: StaffRole) -> str:
     if card:
-        return _card(engine, trip)
+        return _card(engine, trip, role)
     from dockbot.booking import load_zone
 
     return trip_line(trip, load_zone(engine))
 
 
-def _card(engine: Engine, trip: Trip) -> str:
+def _card(engine: Engine, trip: Trip, role: StaffRole) -> str:
     from dockbot.booking import load_zone
 
-    text = "Пропуск\n" + card_text(trip, load_zone(engine), None)
+    documents = "never" if role is StaffRole.warehouse else "always"
+    text = "Пропуск\n" + card_text(trip, load_zone(engine), None, documents)
     if trip.no_driver_chat:
         text += "\nНапоминания не уйдут: у рейса нет чата водителя."
     if trip.departed:
@@ -684,6 +691,31 @@ async def _reply(
         await query.bot.send_message(query.from_user.id, text, reply_markup=markup)
 
 
+@router.callback_query(F.data.startswith("st:deny:"))
+async def deny_entry(query: CallbackQuery, state: FSMContext, engine: Engine) -> None:
+    if not await _guard(query, state, engine):
+        return
+    booking_id = _id(query.data, "st:deny:")
+    user = query.from_user
+    if booking_id is None or user is None:
+        await _reply(query, NOT_FOUND)
+        return
+    try:
+        trip = await asyncio.to_thread(refuse_entry, engine, user.id, booking_id)
+    except AccessDenied:
+        await _reply(query, DENIED)
+        return
+    except PassNotFound:
+        await _reply(query, NOT_FOUND)
+        return
+    except TransitionRejected:
+        await _reply(query, "Не пустить можно только при расхождении документа, пока машина не на территории.")
+        return
+    role = _staff_role(engine, user.id)
+    text = await asyncio.to_thread(_card, engine, trip, role)
+    await _reply(query, f"Рейс не пустили. Бронь отменена.\n\n{text}", _markup(engine, trip, role))
+
+
 @router.callback_query(F.data.startswith("st:out:"))
 async def mark_exit(query: CallbackQuery, state: FSMContext, engine: Engine) -> None:
     if not await _guard(query, state, engine):
@@ -704,8 +736,9 @@ async def mark_exit(query: CallbackQuery, state: FSMContext, engine: Engine) -> 
     except TransitionRejected:
         await _reply(query, "Выезд уже отмечен или рейс ещё не завершён.")
         return
-    text = await asyncio.to_thread(_card, engine, trip)
-    await _reply(query, text, _markup(engine, trip, _staff_role(engine, user.id)))
+    role = _staff_role(engine, user.id)
+    text = await asyncio.to_thread(_card, engine, trip, role)
+    await _reply(query, text, _markup(engine, trip, role))
 
 
 @router.callback_query(F.data.startswith("st:pass:"))
@@ -736,6 +769,22 @@ async def show_desk_pass(query: CallbackQuery, state: FSMContext, engine: Engine
         BufferedInputFile(qr_png(trip.pass_token), filename="pass.png"),
         caption=pass_caption(trip, zone) + "\nНапоминания не уйдут: у рейса нет чата водителя.",
     )
+
+
+async def _send_document(message: Message, trip: Trip, role: StaffRole) -> None:
+    if role is StaffRole.warehouse or not trip.doc_name:
+        return
+    path = document_path(trip.doc_name)
+    if path is None or not path.is_file() or path.stat().st_size == 0:
+        if hasattr(message, "answer"):
+            await message.answer("Фото документа не найдено. Результат сверки — в тексте карточки.")
+        return
+    if not hasattr(message, "answer_photo"):
+        return
+    caption = "Документ: сходится" if trip.doc_result == "match" else "Документ: расхождение"
+    if trip.doc_result not in {"match", "mismatch"}:
+        caption = "Документ: фото есть, сверка не закрыта"
+    await message.answer_photo(FSInputFile(path), caption=caption)
 
 
 def _staff_role(engine: Engine, telegram_id: int | None) -> StaffRole:
