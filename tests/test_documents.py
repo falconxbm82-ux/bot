@@ -72,6 +72,21 @@ class DocumentReadTests(unittest.TestCase):
         self.assertTrue(reading.confident)
         self.assertEqual(reading.verdict, "match")
 
+    def test_different_name_on_the_same_plate_is_a_mismatch(self) -> None:
+        image = _card("ИВАНОВ ИВАН ИВАНОВИЧ", "ГОСНОМЕР А123ВС178")
+        reading = read_document(image, PLATE, "ыфсфыфс")
+        self.assertTrue(reading.confident, reading.text)
+        self.assertEqual(reading.verdict, "mismatch")
+        self.assertIsNone(reading.gap)
+        judged = judge(
+            "ИВАНОВ ИВАН ИВАНОВИЧ\nГОСНОМЕР А123ВС178",
+            PLATE,
+            "ыфсфыфс",
+        )
+        self.assertEqual(judged.verdict, "mismatch")
+        slip = judge("Складской талон", PLATE, "Иванов Иван")
+        self.assertFalse(slip.confident)
+
     def test_gap_names_the_missing_piece(self) -> None:
         self.assertIn("rus.traineddata", ocr_gap(False, None) or "")
         self.assertIn("rus.traineddata", ocr_gap(True, {"eng", "osd"}) or "")

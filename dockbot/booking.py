@@ -377,6 +377,8 @@ def create_booking(
     cargo_value = clean_cargo(cargo_type).value
     kind = _vehicle(vehicle)
     checked_weight = _checked_weight(weight_kg)
+    if doc_result == MISMATCH:
+        raise BookingError("Данные не сходятся. Запись не завершена.")
     checked_doc = _checked_document(doc_file_id, doc_name, doc_result)
     for _attempt in range(PIN_ATTEMPTS):
         try:

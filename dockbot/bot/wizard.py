@@ -203,11 +203,13 @@ async def document_photo(message: Message, state: FSMContext, engine: Engine) ->
     if previous and previous != stored:
         discard_document(previous)
     await state.update_data(doc_file_id=file_id.strip(), doc_name=stored)
-    if reading.confident and reading.verdict:
+    if reading.confident and reading.verdict == "match":
         await state.update_data(doc_result=reading.verdict)
-        label = "сходится" if reading.verdict == "match" else "расхождение"
-        await message.answer(f"Документ: {label}.")
+        await message.answer("Документ: сходится.")
         await show_summary(message, state, engine)
+        return
+    if reading.confident and reading.verdict == "mismatch":
+        await _reject_document(message, state, stored)
         return
     await state.update_data(doc_result=None)
     await state.set_state(BookFlow.document_check)
@@ -238,6 +240,9 @@ async def document_choice(query: CallbackQuery, state: FSMContext, engine: Engin
     if not data.get("doc_name") or not data.get("doc_file_id"):
         await reply(query, "Фото пустое. Пришлите снимок документа.", cancel_step_markup())
         await state.set_state(BookFlow.document)
+        return
+    if verdict == "mismatch":
+        await _reject_document(query, state, data.get("doc_name"))
         return
     await state.update_data(doc_result=verdict)
     await show_summary(query, state, engine)
@@ -547,7 +552,10 @@ async def confirm(query: CallbackQuery, state: FSMContext, engine: Engine) -> No
             await state.clear()
             await reply(query, "Сводка устарела. Начните заново.", driver_menu())
             return
-        if not moving and data.get("doc_result") not in {"match", "mismatch"}:
+        if not moving and data.get("doc_result") != "match":
+            if data.get("doc_result") == "mismatch":
+                await reply(query, _MISMATCH_TEXT)
+                return
             await show_document(query, state)
             return
         try:
@@ -891,6 +899,19 @@ async def _aborted_text(message: Message, state: FSMContext) -> bool:
         text = "Диалог сброшен. Запись не сохранена."
     await message.answer(text, reply_markup=driver_menu())
     return True
+
+
+_MISMATCH_TEXT = (
+    "Документ: расхождение. Данные не сходятся. "
+    "ФИО на фото не совпадает с анкетой. Запись не завершена."
+)
+
+
+async def _reject_document(event: Message | CallbackQuery, state: FSMContext, name: str | None) -> None:
+    discard_document(name)
+    await state.update_data(doc_file_id=None, doc_name=None, doc_result=None)
+    await state.set_state(BookFlow.document)
+    await reply(event, _MISMATCH_TEXT, cancel_step_markup())
 
 
 def _doc_label(result: str | None) -> str | None:

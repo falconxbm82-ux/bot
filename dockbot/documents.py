@@ -200,6 +200,8 @@ def judge(text: str, plate: str, driver_name: str) -> Reading:
     others = [item for item in _PLATE.findall(folded) if item != expected]
     if plate_hit and name_hit and not others:
         return Reading(text, True, MATCH)
+    if _different_name(text, driver_name):
+        return Reading(text, True, MISMATCH)
     if others and not plate_hit:
         return Reading(text, True, MISMATCH)
     return Reading(text, False, None)
@@ -642,6 +644,83 @@ def _plate_present(folded: str, expected: str) -> bool:
     classes = [_PLATE_CLASS.get(char, char) for char in expected]
     for start in range(len(folded) - len(expected) + 1):
         if all(folded[start + index] in classes[index] for index in range(len(expected))):
+            return True
+    return False
+
+
+# Слова бланка, а не фамилия. «Складской талон» не должен стать чужим ФИО.
+_NAME_STOP = {
+    "госномер",
+    "номер",
+    "водитель",
+    "документ",
+    "путевой",
+    "лист",
+    "талон",
+    "складской",
+    "склад",
+    "накладная",
+    "прицеп",
+    "автомобиль",
+    "транспорт",
+    "машина",
+    "машин",
+    "серия",
+    "выдан",
+    "россия",
+    "фамилия",
+    "отчество",
+}
+_PERSON_SUFFIXES = (
+    "ович",
+    "евич",
+    "овна",
+    "евна",
+    "ична",
+    "ова",
+    "ева",
+    "ина",
+    "ов",
+    "ев",
+    "ин",
+    "ич",
+)
+
+
+def _different_name(text: str, driver_name: str) -> bool:
+    """На фото читается другое ФИО, не анкета."""
+    if _name_present(text, driver_name):
+        return False
+    expected = {_soft(part) for part in driver_name.split() if len(part) >= 3}
+    for token in _name_tokens(text):
+        if token in expected:
+            continue
+        if any(
+            token.startswith(part) or part.startswith(token) for part in expected
+        ):
+            continue
+        if _looks_like_person(token):
+            return True
+    return False
+
+
+def _name_tokens(text: str) -> list[str]:
+    tokens: list[str] = []
+    for token in re.findall(r"[0-9A-Za-zА-Яа-яЁё]+", text):
+        soft = _soft(_fold(token))
+        if len(soft) < 3 or any(char.isdigit() for char in soft):
+            continue
+        if re.fullmatch(r"[а-яё]+", soft) is None or soft in _NAME_STOP:
+            continue
+        tokens.append(soft)
+    return tokens
+
+
+def _looks_like_person(token: str) -> bool:
+    if len(token) < 5:
+        return False
+    for suffix in _PERSON_SUFFIXES:
+        if token.endswith(suffix) and len(token) - len(suffix) >= 3:
             return True
     return False
 
