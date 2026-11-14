@@ -8,6 +8,7 @@ import logging
 from datetime import date
 
 from aiogram import F, Router
+from aiogram.dispatcher.event.bases import SkipHandler
 from aiogram.filters import StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -15,6 +16,7 @@ from aiogram.types import CallbackQuery, Message
 from sqlalchemy.engine import Engine
 
 from dockbot.booking import (
+    DAY_TAKEN,
     BookingError,
     FieldError,
     SiteNotConfigured,
@@ -40,7 +42,6 @@ from dockbot.documents import DocumentError, discard_document, read_document, sa
 from dockbot.bot.driver import BOOK, driver_menu
 from dockbot.bot.keyboard import hide_keyboard
 from dockbot.bot.ui import (
-    ABORT,
     CONFIRM,
     DATE_PREFIX,
     MV_OK,
@@ -252,6 +253,10 @@ async def show_vehicle(
     event: Message | CallbackQuery, state: FSMContext, engine: Engine
 ) -> None:
     del engine
+    data = await state.get_data()
+    if not data.get("keyboard_hidden"):
+        await _hide_reply(event)
+        await state.update_data(keyboard_hidden=True)
     await state.set_state(BookFlow.vehicle)
     await reply(event, "Вид транспорта.", vehicle_markup())
 
@@ -312,18 +317,6 @@ async def begin_move(
 ) -> None:
     await state.set_data({"mode": "move", "booking_id": booking_id})
     await show_dates(query, state, engine)
-
-
-@router.callback_query(StateFilter(BookFlow, MoveFlow), F.data == ABORT)
-async def abort(query: CallbackQuery, state: FSMContext) -> None:
-    data = await state.get_data()
-    await state.clear()
-    discard_document(data.get("doc_name"))
-    if data.get("mode") == "move":
-        text = "Диалог сброшен. Бронь не изменена."
-    else:
-        text = "Диалог сброшен. Запись не сохранена."
-    await reply(query, text, driver_menu())
 
 
 @router.callback_query(
@@ -489,9 +482,11 @@ async def back_to_gates(query: CallbackQuery, state: FSMContext, engine: Engine)
     await show_gates(query, state, engine)
 
 
-@router.callback_query(BookFlow.summary, F.data == EDIT)
+@router.callback_query(F.data == EDIT)
 async def edit_details(query: CallbackQuery, state: FSMContext) -> None:
     data = await state.get_data()
+    if data.get("mode") == "move" or not data.get("slot_ts"):
+        raise SkipHandler()
     discard_document(data.get("doc_name"))
     kept = {
         "mode": "create",
@@ -592,6 +587,14 @@ async def confirm(query: CallbackQuery, state: FSMContext, engine: Engine) -> No
             await show_slots(query, state, engine, preface=str(exc))
             return
         except BookingError as exc:
+            if str(exc) == DAY_TAKEN:
+                await state.set_state(BookFlow.plate)
+                await reply(
+                    query,
+                    f"{exc}\nГосномер, например А123ВС178. Дата и слот сохранены.",
+                    cancel_step_markup(),
+                )
+                return
             await reply(query, str(exc))
             return
         await state.clear()
@@ -790,6 +793,7 @@ async def show_summary(
         weight_kg = data.get("weight_kg")
         document = _doc_label(data.get("doc_result"))
         await state.set_state(BookFlow.summary)
+    formula = await _phrase(engine, data)
     await reply(
         event,
         summary_text(
@@ -807,6 +811,7 @@ async def show_summary(
             urgent=bool(data.get("urgent")),
             weight_kg=weight_kg,
             document=document,
+            formula=formula or None,
         ),
         summary_markup(moving),
     )

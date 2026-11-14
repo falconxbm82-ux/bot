@@ -5,17 +5,17 @@ from __future__ import annotations
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from dockbot.booking import Trip
+from dockbot.booking import DURATION_CAP_MINUTES, Trip
 from dockbot.models import BookingStatus
 
 STATUS_LABELS: dict[BookingStatus, str] = {
-    BookingStatus.booked: "🟡 Забронировано",
-    BookingStatus.confirmed: "🟢 Подтверждено",
-    BookingStatus.arrived: "🔵 Прибыл",
-    BookingStatus.unloading: "🟠 На разгрузке",
-    BookingStatus.completed: "✅ Завершено",
-    BookingStatus.late: "🔴 Опоздал",
-    BookingStatus.cancelled: "⚫ Отменено",
+    BookingStatus.booked: "Забронировано",
+    BookingStatus.confirmed: "Подтверждено",
+    BookingStatus.arrived: "Прибыл",
+    BookingStatus.unloading: "На разгрузке",
+    BookingStatus.completed: "Завершено",
+    BookingStatus.late: "Опоздал",
+    BookingStatus.cancelled: "Отменено",
 }
 
 _WEEKDAYS = ("Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс")
@@ -48,6 +48,20 @@ def cargo_detail(
     return ", ".join(parts)
 
 
+def unload_formula(base: int, addon: int, total: int) -> str:
+    """Короткая формула окна: база типа, добавка массы, итог и потолок."""
+    return (
+        f"Разгрузка: база {base} мин, масса +{addon} мин, "
+        f"итого {total} мин, потолок {DURATION_CAP_MINUTES}"
+    )
+
+
+def _formula_line(trip: Trip) -> str | None:
+    if trip.unload_base is None or trip.unload_addon is None or trip.unload_total is None:
+        return None
+    return unload_formula(trip.unload_base, trip.unload_addon, trip.unload_total)
+
+
 def document_line(trip: Trip) -> str:
     if trip.doc_result == "match":
         return "Документ: сходится"
@@ -68,6 +82,9 @@ def pass_caption(trip: Trip, zone: ZoneInfo) -> str:
         f"Время: {clock}",
         f"Груз: {cargo_detail(trip.cargo_type, trip.weight_kg, trip.slot_start, trip.slot_end)}",
     ]
+    formula = _formula_line(trip)
+    if formula:
+        lines.append(formula)
     if trip.doc_result or trip.doc_name:
         lines.append(document_line(trip))
     return "\n".join(lines)
@@ -89,6 +106,7 @@ def summary_text(
     urgent: bool = False,
     weight_kg: int | None = None,
     document: str | None = None,
+    formula: str | None = None,
 ) -> str:
     date_text, clock = local_parts(start, end, zone)
     title = "Перенос брони." if moving else "Проверьте запись."
@@ -102,6 +120,8 @@ def summary_text(
         f"ФИО: {driver_name}",
         f"Груз: {cargo_detail(cargo_type, weight_kg, start, end)}",
     ]
+    if formula:
+        lines.append(formula)
     if document:
         lines.append(document)
     if vehicle:
@@ -130,6 +150,9 @@ def card_text(
         f"Груз: {cargo_detail(trip.cargo_type, trip.weight_kg, trip.slot_start, trip.slot_end)}",
         f"Статус: {STATUS_LABELS[trip.status]}",
     ]
+    formula = _formula_line(trip)
+    if formula:
+        lines.append(formula)
     show_document = documents == "always" or (
         documents == "if_set" and (trip.doc_result or trip.doc_name)
     )
@@ -143,8 +166,8 @@ def card_text(
 def trip_button(trip: Trip, zone: ZoneInfo) -> str:
     local_start = trip.slot_start.astimezone(zone)
     label = (
-        f"{local_start.strftime('%d.%m %H:%M')} · В{trip.gate_code} · "
-        f"{trip.plate} · {STATUS_LABELS[trip.status]}"
+        f"{local_start.strftime('%d.%m %H:%M')} В{trip.gate_code} "
+        f"{trip.plate} {STATUS_LABELS[trip.status]}"
     )
     if len(label) <= 60:
         return label

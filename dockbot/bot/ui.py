@@ -94,16 +94,21 @@ def menu_markup() -> InlineKeyboardMarkup:
 def back_menu_markup() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="«« Назад", callback_data=BACK)],
+            [InlineKeyboardButton(text="Назад", callback_data=BACK)],
             [InlineKeyboardButton(text="В меню", callback_data=MENU)],
         ]
     )
 
 
+def _step_row() -> list[InlineKeyboardButton]:
+    return [
+        InlineKeyboardButton(text="Отмена", callback_data=ABORT),
+        InlineKeyboardButton(text="В меню", callback_data=MENU),
+    ]
+
+
 def cancel_step_markup() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text="Отмена", callback_data=ABORT)]]
-    )
+    return InlineKeyboardMarkup(inline_keyboard=[_step_row()])
 
 
 def dates_markup(dates: list[date]) -> InlineKeyboardMarkup:
@@ -121,7 +126,7 @@ def dates_markup(dates: list[date]) -> InlineKeyboardMarkup:
             row = []
     if row:
         rows.append(row)
-    rows.append([InlineKeyboardButton(text="Отмена", callback_data=ABORT)])
+    rows.append(_step_row())
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -137,8 +142,8 @@ def gates_markup(gates: list[GateChoice]) -> InlineKeyboardMarkup:
     ]
     rows.append(
         [
-            InlineKeyboardButton(text="«« Назад", callback_data=BACK),
-            InlineKeyboardButton(text="Отмена", callback_data=ABORT),
+            InlineKeyboardButton(text="Назад", callback_data=BACK),
+            InlineKeyboardButton(text="В меню", callback_data=MENU),
         ]
     )
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -158,7 +163,7 @@ def slots_markup(
         label = f"{start.strftime('%H:%M')}–{end.strftime('%H:%M')}"
         token = int(slot.start.timestamp())
         if current_ts is not None and token == current_ts:
-            label = f"{label} · текущий"
+            label = f"{label} текущий"
             callback = CURRENT_SLOT
         else:
             callback = f"{SLOT_PREFIX}{token}"
@@ -170,8 +175,8 @@ def slots_markup(
         rows.append(row)
     rows.append(
         [
-            InlineKeyboardButton(text="«« Назад", callback_data=BACK),
-            InlineKeyboardButton(text="Отмена", callback_data=ABORT),
+            InlineKeyboardButton(text="Назад", callback_data=BACK),
+            InlineKeyboardButton(text="В меню", callback_data=MENU),
         ]
     )
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -182,7 +187,7 @@ def vehicle_markup() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [InlineKeyboardButton(text="Малотоннажный", callback_data="bk:veh:light")],
             [InlineKeyboardButton(text="Обычный", callback_data="bk:veh:heavy")],
-            [InlineKeyboardButton(text="Отмена", callback_data=ABORT)],
+            _step_row(),
         ]
     )
 
@@ -192,7 +197,7 @@ def urgent_markup() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [InlineKeyboardButton(text="Срочный", callback_data="bk:urgent:1")],
             [InlineKeyboardButton(text="Обычный", callback_data="bk:urgent:0")],
-            [InlineKeyboardButton(text="Отмена", callback_data=ABORT)],
+            _step_row(),
         ]
     )
 
@@ -218,7 +223,7 @@ def weight_markup() -> InlineKeyboardMarkup:
     rows.append(
         [InlineKeyboardButton(text="Другой вес", callback_data="bk:weight:other")]
     )
-    rows.append([InlineKeyboardButton(text="Отмена", callback_data=ABORT)])
+    rows.append(_step_row())
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -246,7 +251,7 @@ def document_markup() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [InlineKeyboardButton(text="Сходится", callback_data="bk:doc:match")],
             [InlineKeyboardButton(text="Расхождение", callback_data="bk:doc:mismatch")],
-            [InlineKeyboardButton(text="Отмена", callback_data=ABORT)],
+            _step_row(),
         ]
     )
 
@@ -256,11 +261,11 @@ def cargo_markup(minutes: dict[str, int] | None = None) -> InlineKeyboardMarkup:
     for code, label in _CARGOS:
         title = label
         if minutes and code in minutes:
-            title = f"{label} · {minutes[code]} мин"
+            title = f"{label} {minutes[code]} мин"
         rows.append(
             [InlineKeyboardButton(text=title, callback_data=f"{CARGO_PREFIX}{code}")]
         )
-    rows.append([InlineKeyboardButton(text="Отмена", callback_data=ABORT)])
+    rows.append(_step_row())
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -268,13 +273,13 @@ def summary_markup(moving: bool) -> InlineKeyboardMarkup:
     if moving:
         rows = [
             [InlineKeyboardButton(text="Подтвердить перенос", callback_data=MV_OK)],
-            [InlineKeyboardButton(text="Отмена", callback_data=ABORT)],
+            _step_row(),
         ]
     else:
         rows = [
             [InlineKeyboardButton(text="Подтвердить запись", callback_data=CONFIRM)],
             [InlineKeyboardButton(text="Изменить данные", callback_data=EDIT)],
-            [InlineKeyboardButton(text="Отмена", callback_data=ABORT)],
+            _step_row(),
         ]
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -311,12 +316,12 @@ def trips_markup(
     if offset > 0:
         prev = max(0, offset - PAGE_SIZE)
         nav.append(
-            InlineKeyboardButton(text="◀", callback_data=f"{PAGE_PREFIX}{prev}")
+            InlineKeyboardButton(text="Ранее", callback_data=f"{PAGE_PREFIX}{prev}")
         )
     if offset + PAGE_SIZE < len(trips):
         nav.append(
             InlineKeyboardButton(
-                text="▶",
+                text="Дальше",
                 callback_data=f"{PAGE_PREFIX}{offset + PAGE_SIZE}",
             )
         )
@@ -382,7 +387,7 @@ def card_markup(trip: Trip, can_change: bool) -> InlineKeyboardMarkup:
         )
     rows.append(
         [
-            InlineKeyboardButton(text="«« Назад", callback_data=CALLBACK_LIST),
+            InlineKeyboardButton(text="Назад", callback_data=CALLBACK_LIST),
             InlineKeyboardButton(text="В меню", callback_data=MENU),
         ]
     )

@@ -31,7 +31,18 @@ from dockbot.access import (
 from dockbot.bot.driver import driver_menu
 from dockbot.bot.keyboard import keyboard_for
 from dockbot.bot.ui import MENU
-from dockbot.booking import SiteNotConfigured, Trip
+from dockbot.booking import (
+    DAY_TAKEN,
+    BookingError,
+    FieldError,
+    SiteNotConfigured,
+    Trip,
+    change_block,
+    clean_driver_name,
+    clean_make,
+    normalize_plate,
+    staff_update_party,
+)
 from dockbot.checkpoint import (
     PassNotFound,
     TransitionRejected,
@@ -85,6 +96,9 @@ LOGGED_OUT = "Вы вышли из роли."
 class StaffFlow(StatesGroup):
     pin = State()
     checkpoint = State()
+    edit_plate = State()
+    edit_make = State()
+    edit_name = State()
 
 
 def staff_menu(role: StaffRole):
@@ -291,7 +305,97 @@ async def open_row(query: CallbackQuery, state: FSMContext, engine: Engine) -> N
     if trip is None:
         await _reply(query, NOT_FOUND)
         return
+    await state.update_data(staff_edit_id=trip.id)
     await _show_row(query, engine, trip)
+
+
+@router.callback_query(F.data.startswith("st:edit:"))
+async def edit_party(query: CallbackQuery, state: FSMContext, engine: Engine) -> None:
+    person = await _guard(query, state, engine)
+    if person is None:
+        return
+    booking_id = _id(query.data, "st:edit:")
+    user = query.from_user
+    if booking_id is None or user is None:
+        await _reply(query, NOT_FOUND)
+        return
+    try:
+        trip = await asyncio.to_thread(load_trip, engine, user.id, booking_id)
+    except AccessDenied:
+        await _reply(query, DENIED)
+        return
+    if trip is None:
+        await _reply(query, NOT_FOUND)
+        return
+    block = await asyncio.to_thread(change_block, engine, trip)
+    if block is not None:
+        await _reply(query, block)
+        return
+    await state.set_state(StaffFlow.edit_plate)
+    await state.update_data(staff_edit_id=trip.id)
+    await _reply(query, "Новый госномер, например А123ВС178.")
+
+
+@router.message(StaffFlow.edit_plate, F.text)
+async def staff_edit_plate(message: Message, state: FSMContext) -> None:
+    try:
+        plate = normalize_plate(message.text or "")
+    except FieldError as exc:
+        await message.answer(str(exc))
+        return
+    await state.update_data(staff_plate=plate)
+    await state.set_state(StaffFlow.edit_make)
+    await message.answer("Марка.")
+
+
+@router.message(StaffFlow.edit_make, F.text)
+async def staff_edit_make(message: Message, state: FSMContext) -> None:
+    try:
+        field = clean_make(message.text or "")
+    except FieldError as exc:
+        await message.answer(str(exc))
+        return
+    await state.update_data(staff_make=field.value)
+    await state.set_state(StaffFlow.edit_name)
+    await message.answer("ФИО: три слова, только буквы.")
+
+
+@router.message(StaffFlow.edit_name, F.text)
+async def staff_edit_name(message: Message, state: FSMContext, engine: Engine) -> None:
+    user = message.from_user
+    if user is None:
+        return
+    try:
+        field = clean_driver_name(message.text or "")
+    except FieldError as exc:
+        await message.answer(str(exc))
+        return
+    data = await state.get_data()
+    booking_id = data.get("staff_edit_id")
+    if not booking_id:
+        await state.clear()
+        await message.answer("Кнопка устарела. Откройте карточку рейса снова.")
+        return
+    try:
+        trip = await asyncio.to_thread(
+            staff_update_party,
+            engine,
+            telegram_id=user.id,
+            booking_id=int(booking_id),
+            plate=data.get("staff_plate", ""),
+            make=data.get("staff_make", ""),
+            driver_name=field.value,
+        )
+    except BookingError as exc:
+        await message.answer(str(exc))
+        if str(exc) == DAY_TAKEN:
+            await state.set_state(StaffFlow.edit_plate)
+            await message.answer("Укажите другой госномер, например А123ВС178.")
+        return
+    await state.set_state(None)
+    role = _staff_role(engine, user.id)
+    text = await asyncio.to_thread(_card, engine, trip, role)
+    await message.answer(f"Данные обновлены.\n\n{text}", reply_markup=_markup(engine, trip, role))
 
 
 @router.callback_query(F.data.startswith(ARRIVED_PREFIX))
@@ -461,13 +565,19 @@ def _markup(engine: Engine, trip: Trip, role: StaffRole) -> InlineKeyboardMarkup
                 )
             ],
         )
-    if True:
-        rows.append(
-            [
-                InlineKeyboardButton(text="К списку", callback_data=SHIFT),
-                InlineKeyboardButton(text="В меню", callback_data=MENU),
-            ]
-        )
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="Изменить данные", callback_data=f"st:edit:{trip.id}"
+            )
+        ]
+    )
+    rows.append(
+        [
+            InlineKeyboardButton(text="К списку", callback_data=SHIFT),
+            InlineKeyboardButton(text="В меню", callback_data=MENU),
+        ]
+    )
     if not rows:
         return None
     return InlineKeyboardMarkup(inline_keyboard=rows)

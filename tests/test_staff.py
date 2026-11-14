@@ -614,7 +614,13 @@ class StaffTests(unittest.TestCase):
             with self.assertRaises(TransitionRejected):
                 apply_mark(ENGINE, STAFF_TG, late.id, target, now=NOW)
         self.assertEqual(self._status(late.id), BookingStatus.late)
-        cancelled = self._book(TOMORROW, 10)
+        cancelled = self._book(
+            TOMORROW,
+            10,
+            telegram_id=DRIVER + 8,
+            plate="В210ВВ77",
+            driver_name="Петров Петр Петрович",
+        )
         self._set_status(cancelled.id, BookingStatus.cancelled)
         with self.assertRaises(TransitionRejected):
             apply_mark(
@@ -751,6 +757,7 @@ class StaffTests(unittest.TestCase):
         telegram_id: int = DRIVER,
         gate_id: int | None = None,
         plate: str = "A100AA77",
+        driver_name: str = "Иванов Иван Иванович",
     ) -> Trip:
         gate_id = self.gate_a if gate_id is None else gate_id
         for slot in slots_for_gate(ENGINE, day, gate_id, now=NOW):
@@ -761,7 +768,7 @@ class StaffTests(unittest.TestCase):
                     slot_start=slot.start,
                     plate=plate,
                     make="КАМАЗ",
-                    driver_name="Иванов",
+                    driver_name=driver_name,
                     cargo_type="Паллеты",
                     telegram_id=telegram_id,
                     chat_id=telegram_id,
@@ -778,7 +785,7 @@ class StaffTests(unittest.TestCase):
             slot_start=slot_start,
             plate=plate,
             make="КАМАЗ",
-            driver_name="Петров",
+            driver_name="Петров Петр Петрович",
             cargo_type="Коробки",
             telegram_id=telegram_id,
             chat_id=telegram_id,
@@ -945,7 +952,7 @@ class StaffTests(unittest.TestCase):
                 slot_start=start,
                 plate="A100AA77",
                 make="КАМАЗ",
-                driver_name="Иванов",
+                driver_name="Иванов Иван Иванович",
                 cargo_type="Паллеты",
                 telegram_id=DRIVER,
                 chat_id=DRIVER,
@@ -959,7 +966,7 @@ class StaffTests(unittest.TestCase):
             slot_start=busy,
             plate="A100AA77",
             make="КАМАЗ",
-            driver_name="Иванов",
+            driver_name="Иванов Иван Иванович",
             cargo_type="Паллеты",
             telegram_id=DRIVER,
             chat_id=DRIVER,
@@ -1022,7 +1029,7 @@ class StaffTests(unittest.TestCase):
             booking_id=trip.id,
             plate="А777АА77",
             make="ГАЗ",
-            driver_name="Петров",
+            driver_name="Петров Петр Петрович",
             cargo_type="Навал",
             now=NOW,
         )
@@ -1038,7 +1045,7 @@ class StaffTests(unittest.TestCase):
                 booking_id=trip.id,
                 plate="А888АА77",
                 make="ГАЗ",
-                driver_name="Петров",
+                driver_name="Петров Петр Петрович",
                 cargo_type="Навал",
                 now=NOW,
             )
@@ -1052,7 +1059,7 @@ class StaffTests(unittest.TestCase):
                 booking_id=trip.id,
                 plate="А999АА77",
                 make="ГАЗ",
-                driver_name="Петров",
+                driver_name="Петров Петр Петрович",
                 cargo_type="Навал",
                 now=NOW,
             )
@@ -1067,7 +1074,7 @@ class StaffTests(unittest.TestCase):
             slot_start=start,
             plate="A100AA77",
             make="КАМАЗ",
-            driver_name="Иванов",
+            driver_name="Иванов Иван Иванович",
             cargo_type="Паллеты",
             telegram_id=DRIVER,
             chat_id=DRIVER,
@@ -1082,7 +1089,7 @@ class StaffTests(unittest.TestCase):
                 slot_start=_at(TOMORROW, 9),
                 plate="B200BB77",
                 make="КАМАЗ",
-                driver_name="Иванов",
+                driver_name="Иванов Иван Иванович",
                 cargo_type="Паллеты",
                 telegram_id=DRIVER + 1,
                 chat_id=DRIVER + 1,
@@ -1110,7 +1117,7 @@ class StaffTests(unittest.TestCase):
         admin = [item.label for item in actions_for(ENGINE, arrived, StaffRole.admin)]
         self.assertEqual(guard, [])
         self.assertTrue(all(label.startswith("На воротах") for label in warehouse))
-        self.assertIn("· 0", warehouse[0])
+        self.assertIn(" 0", warehouse[0])
         self.assertTrue(any(label.startswith("На воротах") for label in admin))
         unloading = apply_mark(
             ENGINE, WAREHOUSE_TG, trip.id, BookingStatus.unloading, now=NOW
@@ -1226,7 +1233,7 @@ class StaffTests(unittest.TestCase):
             slot_start=_at(TOMORROW, 11),
             plate="A100AA77",
             make="КАМАЗ",
-            driver_name="Иванов",
+            driver_name="Иванов Иван Иванович",
             cargo_type="Паллеты",
             telegram_id=None,
             chat_id=None,
@@ -1246,16 +1253,17 @@ class StaffTests(unittest.TestCase):
         self.assertEqual(unload_minutes(60, 40000, 1000), 240)
         self._staff(pin="3333", telegram_id=STAFF_TG, name="Администратор", role=StaffRole.admin)
         phrase = window_phrase(ENGINE, "Паллеты", 6000)
-        self.assertIn("Окно 75 мин", phrase)
-        self.assertIn("норма 60", phrase)
-        self.assertIn("Потолок 240", phrase)
+        self.assertEqual(
+            phrase,
+            "Разгрузка: база 60 мин, масса +15 мин, итого 75 мин, потолок 240",
+        )
         heavy = create_booking(
             ENGINE,
             gate_id=self.gate_a,
             slot_start=_at(TOMORROW, 8),
             plate="A100AA77",
             make="КАМАЗ",
-            driver_name="Иванов",
+            driver_name="Иванов Иван Иванович",
             cargo_type="Паллеты",
             telegram_id=DRIVER,
             chat_id=DRIVER,
@@ -1274,7 +1282,7 @@ class StaffTests(unittest.TestCase):
             slot_start=_at(TOMORROW, 10),
             plate="B200BB77",
             make="ГАЗ",
-            driver_name="Иванов",
+            driver_name="Петров Петр Петрович",
             cargo_type="Паллеты",
             telegram_id=DRIVER + 3,
             chat_id=DRIVER + 3,
@@ -1293,7 +1301,7 @@ class StaffTests(unittest.TestCase):
             slot_start=_at(TOMORROW, 8),
             plate="C300CC77",
             make="КАМАЗ",
-            driver_name="Иванов",
+            driver_name="Сидоров Сидор Сидорович",
             cargo_type="Паллеты",
             telegram_id=DRIVER + 5,
             chat_id=DRIVER + 5,
@@ -1307,6 +1315,10 @@ class StaffTests(unittest.TestCase):
         self.assertIn("6 т", line)
         self.assertIn("75 мин", line)
         self.assertIn("Паллеты, 6 т, 75 мин", card)
+        self.assertIn(
+            "Разгрузка: база 60 мин, масса +15 мин, итого 75 мин, потолок 240",
+            card,
+        )
 
     def test_document_check_stores_photo_and_guard_can_refuse(self) -> None:
         self._staff(pin="1111", telegram_id=STAFF_TG)
@@ -1400,7 +1412,7 @@ class StaffTests(unittest.TestCase):
                 slot_start=_at(TOMORROW, 11),
                 plate="А123ВС178",
                 make="КАМАЗ",
-                driver_name="Иванов Иван",
+                driver_name="Иванов Иван Иванович",
                 cargo_type="Паллеты",
                 telegram_id=DRIVER + 6,
                 chat_id=DRIVER + 6,
@@ -1412,7 +1424,7 @@ class StaffTests(unittest.TestCase):
                 chat_id=DRIVER + 6,
                 booking_id=other.id,
                 file_id="file-match",
-                image=_paper("А123ВС178", "Иванов Иван"),
+                image=_paper("А123ВС178", "Иванов Иван Иванович"),
             )
             names.append(matched.trip.doc_name or "")
             self.assertEqual(matched.verdict, "match")
