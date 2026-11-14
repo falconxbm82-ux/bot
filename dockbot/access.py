@@ -177,7 +177,7 @@ def enter_role(
 def enter_pin(engine: Engine, telegram_id: int, pin: str) -> StaffMember:
     """Первый успешный PIN записывает пустой Telegram ID и не затирает чужой."""
     secret = pin.strip()
-    # На стенде PIN персонала — ровно 6 цифр. Отказ общий, без подсказки длины.
+    # На стенде PIN персонала — ровно 4 цифры. Отказ общий, без подсказки длины.
     if not (secret.isdigit() and len(secret) == STAFF_PIN_LENGTH):
         _deny(telegram_id)
     with Session(engine) as session:

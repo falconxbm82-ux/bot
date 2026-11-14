@@ -9,14 +9,16 @@ from dockbot.booking import Trip
 from dockbot.models import BookingStatus
 
 STATUS_LABELS: dict[BookingStatus, str] = {
-    BookingStatus.booked: "Забронировано",
-    BookingStatus.confirmed: "Подтверждено",
-    BookingStatus.arrived: "Прибыл на КПП",
-    BookingStatus.unloading: "На разгрузке",
-    BookingStatus.completed: "Завершено",
-    BookingStatus.late: "Опоздал",
-    BookingStatus.cancelled: "Отменено",
+    BookingStatus.booked: "🟡 Забронировано",
+    BookingStatus.confirmed: "🟢 Подтверждено",
+    BookingStatus.arrived: "🔵 Прибыл",
+    BookingStatus.unloading: "🟠 На разгрузке",
+    BookingStatus.completed: "✅ Завершено",
+    BookingStatus.late: "🔴 Опоздал",
+    BookingStatus.cancelled: "⚫ Отменено",
 }
+
+_WEEKDAYS = ("Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс")
 
 
 def local_parts(start: datetime, end: datetime, zone: ZoneInfo) -> tuple[str, str]:
@@ -28,7 +30,11 @@ def local_parts(start: datetime, end: datetime, zone: ZoneInfo) -> tuple[str, st
 
 
 def gate_label(code: str) -> str:
-    return f"№{code}"
+    return f"Ворота {code}"
+
+
+def day_button(day) -> str:
+    return f"{_WEEKDAYS[day.weekday()]} {day.strftime('%d.%m')}"
 
 
 def pass_caption(trip: Trip, zone: ZoneInfo) -> str:
@@ -88,8 +94,8 @@ def card_text(trip: Trip, zone: ZoneInfo, block: str | None) -> str:
 def trip_button(trip: Trip, zone: ZoneInfo) -> str:
     local_start = trip.slot_start.astimezone(zone)
     label = (
-        f"{local_start.strftime('%d.%m %H:%M')} {gate_label(trip.gate_code)} "
-        f"{trip.plate} {STATUS_LABELS[trip.status]}"
+        f"{local_start.strftime('%d.%m %H:%M')} · В{trip.gate_code} · "
+        f"{trip.plate} · {STATUS_LABELS[trip.status]}"
     )
     if len(label) <= 60:
         return label

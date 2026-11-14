@@ -1,31 +1,61 @@
-"""Нижняя клавиатура. Три роли видны всегда.
-
-Кнопки шага (дата, ворота, слот, карточка рейса) остаются в сообщении:
-их набор зависит от рейса и в одну постоянную клавиатуру не входит.
-"""
+"""Нижняя клавиатура роли. На время мастера её снимают и возвращают в меню."""
 
 from __future__ import annotations
 
-from aiogram.types import KeyboardButton, ReplyKeyboardMarkup
+from aiogram.types import KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove
 
 from dockbot.models import StaffRole
 
 ROLE_DRIVER = "Водитель"
 ROLE_GUARD = "Охрана"
 ROLE_WAREHOUSE = "Кладовщик"
-BOOK = "Забронировать"
+
+BOOK = "Записаться"
 MY_BOOKINGS = "Мои брони"
-CHECK_PASS = "Проверить пропуск"
-SHIFT_BOARD = "Экран смены"
+MY_PASS = "Мой пропуск"
+DIRECTIONS = "Как проехать"
+CANCEL_TRIP = "Отменить"
+MOVE_TRIP = "Перенести"
+HELP = "Помощь"
+STAFF_ENTRY = "Я сотрудник"
 
-_ROLES = (ROLE_DRIVER, ROLE_GUARD, ROLE_WAREHOUSE)
+SCAN = "Сканировать QR"
+ENTER_PIN = "Ввести PIN"
+SHIFT_TODAY = "Смена сегодня"
+
+MONITOR = "Монитор смены"
+WAITING = "Ожидаются"
+ON_SITE = "На территории"
+FINISHED = "Завершены"
+
+GATES = "Ворота"
+SLOTS = "Слоты"
+STAFF_LIST = "Сотрудники"
+SETTINGS = "Параметры"
+DAY_SUMMARY = "Сводка дня"
+SEND_POINT = "Отправить геопозицию"
+
+CALLBACK_BOOK = "bk:book"
+CALLBACK_LIST = "my:list"
+NAV_MENU = "nav:menu"
 
 
-def persistent_keyboard(*actions: str) -> ReplyKeyboardMarkup:
-    rows = [[KeyboardButton(text=action) for action in actions]]
-    rows.append([KeyboardButton(text=role) for role in _ROLES])
+def hide_keyboard() -> ReplyKeyboardRemove:
+    return ReplyKeyboardRemove()
+
+
+def _rows(*lines: tuple[str, ...]) -> ReplyKeyboardMarkup:
+    keyboard = [[KeyboardButton(text=label) for label in line] for line in lines]
     return ReplyKeyboardMarkup(
-        keyboard=rows,
+        keyboard=keyboard,
+        resize_keyboard=True,
+        is_persistent=True,
+    )
+
+
+def location_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text=SEND_POINT, request_location=True)]],
         resize_keyboard=True,
         is_persistent=True,
     )
@@ -33,11 +63,57 @@ def persistent_keyboard(*actions: str) -> ReplyKeyboardMarkup:
 
 def keyboard_for(role: StaffRole | None) -> ReplyKeyboardMarkup:
     if role is StaffRole.security:
-        return persistent_keyboard(CHECK_PASS)
+        return _rows((SCAN, ENTER_PIN), (SHIFT_TODAY, HELP))
     if role is StaffRole.warehouse:
-        return persistent_keyboard(SHIFT_BOARD)
-    return persistent_keyboard(BOOK, MY_BOOKINGS)
+        return _rows((MONITOR, WAITING), (ON_SITE, FINISHED), (HELP,))
+    if role is StaffRole.admin:
+        return _rows((GATES, SLOTS), (STAFF_LIST, SETTINGS), (DAY_SUMMARY, HELP))
+    return _rows(
+        (BOOK, MY_BOOKINGS),
+        (MY_PASS, DIRECTIONS),
+        (CANCEL_TRIP, MOVE_TRIP),
+        (STAFF_ENTRY, HELP),
+    )
 
 
 def button_labels(markup: ReplyKeyboardMarkup) -> list[str]:
     return [button.text for row in markup.keyboard for button in row]
+
+
+def help_text(role: StaffRole | None) -> str:
+    if role is StaffRole.security:
+        return (
+            "Охрана\n"
+            "«Сканировать QR» — фото пропуска.\n"
+            "«Ввести PIN» — шесть цифр пропуска.\n"
+            "«Смена сегодня» — машины этих суток.\n"
+            "На карточке: «Отметить прибытие», «На воротах N», «Разгружен».\n"
+            "Вернуться водителем: /logout."
+        )
+    if role is StaffRole.warehouse:
+        return (
+            "Кладовщик\n"
+            "«Монитор смены» — все машины суток.\n"
+            "«Ожидаются», «На территории», «Завершены» — тот же список с фильтром.\n"
+            "На карточке те же отметки, что у охраны.\n"
+            "QR кладовщик не сканирует: машина берётся из списка.\n"
+            "Вернуться водителем: /logout."
+        )
+    if role is StaffRole.admin:
+        return (
+            "Администратор\n"
+            "«Ворота» — включить, выключить, добавить.\n"
+            "«Слоты» — окно 08:00–20:00, закрыть свободный слот.\n"
+            "«Сотрудники» — PIN на 4 цифры, отзыв доступа.\n"
+            "«Параметры» — окно отмены, опоздание, адрес, точка.\n"
+            "«Сводка дня» — сколько броней в каждом статусе."
+        )
+    return (
+        "Водитель\n"
+        "«Записаться» — новое окно разгрузки.\n"
+        "«Мои брони» — список и карточка.\n"
+        "«Мой пропуск» — QR и PIN.\n"
+        "«Как проехать» — адрес и точка склада.\n"
+        "«Отменить» и «Перенести» — пока до слота больше окна отмены.\n"
+        "«Я сотрудник» — PIN из 4 цифр."
+    )

@@ -43,6 +43,7 @@ class Base(DeclarativeBase):
 class StaffRole(str, enum.Enum):
     security = "security"
     warehouse = "warehouse"
+    admin = "admin"
 
 
 class BookingStatus(str, enum.Enum):
@@ -274,6 +275,21 @@ class NotificationLog(Base):
     __table_args__ = (Index("ix_notification_log_booking_id", "booking_id"),)
 
 
+class ClosedSlot(Base):
+    __tablename__ = "closed_slots"
+
+    id: Mapped[int] = mapped_column(Integer, Identity(), primary_key=True)
+    gate_id: Mapped[int] = mapped_column(
+        ForeignKey("gates.id", ondelete="CASCADE"), nullable=False
+    )
+    starts_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("gate_id", "starts_at", name="uq_closed_slots_gate_start"),
+        Index("ix_closed_slots_gate_start", "gate_id", "starts_at"),
+    )
+
+
 class SiteSettings(Base):
     __tablename__ = "site_settings"
 
@@ -282,6 +298,10 @@ class SiteSettings(Base):
     latitude: Mapped[Decimal | None] = mapped_column(Numeric(9, 6))
     longitude: Mapped[Decimal | None] = mapped_column(Numeric(9, 6))
     cancel_window_hours: Mapped[int] = mapped_column(Integer, nullable=False)
+    address: Mapped[str | None] = mapped_column(String(300))
+    late_after_minutes: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=15, server_default=text("15")
+    )
 
     __table_args__ = (
         CheckConstraint("id = 1", name="ck_site_settings_singleton"),
@@ -296,5 +316,8 @@ class SiteSettings(Base):
         ),
         CheckConstraint(
             "cancel_window_hours > 0", name="ck_site_settings_cancel_window"
+        ),
+        CheckConstraint(
+            "late_after_minutes > 0", name="ck_site_settings_late_after"
         ),
     )

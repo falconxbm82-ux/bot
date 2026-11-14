@@ -42,14 +42,6 @@ _STAMP = {
     BookingStatus.completed: "completed_at",
 }
 
-# «Прибыл» ставит охрана. «На воротах» и «Разгружен» ставит склад.
-_MARK_ROLE = {
-    BookingStatus.arrived: StaffRole.security,
-    BookingStatus.unloading: StaffRole.warehouse,
-    BookingStatus.completed: StaffRole.warehouse,
-}
-
-
 class PassNotFound(Exception):
     """Токен или PIN пропуска не найден. Статус не менялся."""
 
@@ -104,11 +96,13 @@ def apply_mark(
     target: BookingStatus,
     now: datetime | None = None,
 ) -> Trip:
-    """Условное обновление: проигравшая транзакция видит уже новый статус."""
-    role = _MARK_ROLE.get(target)
-    if role is None:
+    """Условное обновление: проигравшая транзакция видит уже новый статус.
+
+    Отметку ставит охрана или кладовщик. Водитель её не ставит.
+    """
+    if target not in _STAMP:
         raise TransitionRejected()
-    require_role(engine, telegram_id, role)
+    require_staff(engine, telegram_id)
     moment = now or datetime.now(timezone.utc)
     if moment.tzinfo is None:
         raise TransitionRejected()

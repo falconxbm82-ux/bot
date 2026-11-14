@@ -16,19 +16,50 @@ from sqlalchemy.engine import Engine
 from dockbot.access import active_staff, logout_staff
 from dockbot.bot.keyboard import (
     BOOK,
-    CHECK_PASS,
+    CANCEL_TRIP,
+    DAY_SUMMARY,
+    DIRECTIONS,
+    ENTER_PIN,
+    FINISHED,
+    GATES,
+    HELP,
+    MONITOR,
+    MOVE_TRIP,
     MY_BOOKINGS,
+    MY_PASS,
+    ON_SITE,
     ROLE_DRIVER,
     ROLE_GUARD,
     ROLE_WAREHOUSE,
-    SHIFT_BOARD,
+    SCAN,
+    SETTINGS,
+    SHIFT_TODAY,
+    SLOTS,
+    STAFF_ENTRY,
+    STAFF_LIST,
+    WAITING,
+    help_text,
     keyboard_for,
 )
-from dockbot.bot.mine import show_my_bookings
+from dockbot.bot.mine import (
+    show_cancel_choices,
+    show_directions,
+    show_move_choices,
+    show_my_bookings,
+    show_my_pass,
+)
+from dockbot.bot.admin import (
+    open_day,
+    open_gates,
+    open_settings,
+    open_slots,
+    open_staff,
+)
 from dockbot.bot.staff import (
     PIN_PROMPT,
     StaffFlow,
     open_checkpoint,
+    open_pass_pin,
     open_shift,
 )
 from dockbot.bot.wizard import show_dates
@@ -78,14 +109,119 @@ async def choose_bookings(message: Message, engine: Engine) -> None:
     await show_my_bookings(message, engine)
 
 
-@router.message(F.text == CHECK_PASS)
-async def choose_check(message: Message, state: FSMContext, engine: Engine) -> None:
+@router.message(F.text == MY_PASS)
+async def choose_pass(message: Message, engine: Engine) -> None:
+    await show_my_pass(message, engine)
+
+
+@router.message(F.text == DIRECTIONS)
+async def choose_directions(message: Message, engine: Engine) -> None:
+    await show_directions(message, engine)
+
+
+@router.message(F.text == CANCEL_TRIP)
+async def choose_cancel(message: Message, engine: Engine) -> None:
+    await show_cancel_choices(message, engine)
+
+
+@router.message(F.text == MOVE_TRIP)
+async def choose_move(message: Message, engine: Engine) -> None:
+    await show_move_choices(message, engine)
+
+
+@router.message(F.text == STAFF_ENTRY)
+async def choose_staff_entry(
+    message: Message, state: FSMContext, engine: Engine
+) -> None:
+    user = message.from_user
+    if user is None:
+        return
+    person = await asyncio.to_thread(active_staff, engine, user.id)
+    if person is not None:
+        await state.clear()
+        await message.answer(
+            "Вы уже вошли. Чтобы сменить роль, отправьте /logout.",
+            reply_markup=keyboard_for(person.role),
+        )
+        return
+    await state.clear()
+    await state.set_state(StaffFlow.pin)
+    await state.update_data(pin_fails=0)
+    await message.answer(PIN_PROMPT)
+
+
+@router.message(F.text == GATES)
+async def choose_gates(message: Message, state: FSMContext, engine: Engine) -> None:
+    await open_gates(message, state, engine)
+
+
+@router.message(F.text == SLOTS)
+async def choose_slots(message: Message, state: FSMContext, engine: Engine) -> None:
+    await open_slots(message, state, engine)
+
+
+@router.message(F.text == STAFF_LIST)
+async def choose_staff_list(
+    message: Message, state: FSMContext, engine: Engine
+) -> None:
+    await open_staff(message, state, engine)
+
+
+@router.message(F.text == SETTINGS)
+async def choose_settings(message: Message, state: FSMContext, engine: Engine) -> None:
+    await open_settings(message, state, engine)
+
+
+@router.message(F.text == DAY_SUMMARY)
+async def choose_day(message: Message, state: FSMContext, engine: Engine) -> None:
+    await open_day(message, state, engine)
+
+
+@router.message(F.text == HELP)
+async def choose_help(message: Message, engine: Engine) -> None:
+    user = message.from_user
+    person = None
+    if user is not None:
+        person = await asyncio.to_thread(active_staff, engine, user.id)
+    role = None if person is None else person.role
+    await message.answer(help_text(role), reply_markup=keyboard_for(role))
+
+
+@router.message(F.text == SCAN)
+async def choose_scan(message: Message, state: FSMContext, engine: Engine) -> None:
     await open_checkpoint(message, state, engine)
 
 
-@router.message(F.text == SHIFT_BOARD)
-async def choose_shift(message: Message, state: FSMContext, engine: Engine) -> None:
-    await open_shift(message, state, engine)
+@router.message(F.text == ENTER_PIN)
+async def choose_pass_pin(message: Message, state: FSMContext, engine: Engine) -> None:
+    await open_pass_pin(message, state, engine)
+
+
+@router.message(F.text == SHIFT_TODAY)
+async def choose_guard_shift(
+    message: Message, state: FSMContext, engine: Engine
+) -> None:
+    await open_shift(message, state, engine, "day")
+
+
+@router.message(F.text == MONITOR)
+async def choose_monitor(message: Message, state: FSMContext, engine: Engine) -> None:
+    await open_shift(message, state, engine, "day")
+
+
+@router.message(F.text == WAITING)
+async def choose_waiting(message: Message, state: FSMContext, engine: Engine) -> None:
+    await open_shift(message, state, engine, "wait")
+
+
+@router.message(F.text == ON_SITE)
+async def choose_onsite(message: Message, state: FSMContext, engine: Engine) -> None:
+    await open_shift(message, state, engine, "onsite")
+
+
+@router.message(F.text == FINISHED)
+async def choose_finished(message: Message, state: FSMContext, engine: Engine) -> None:
+    await open_shift(message, state, engine, "done")
 
 
 async def _choose_staff(
@@ -105,5 +241,5 @@ async def _choose_staff(
         return
     await state.clear()
     await state.set_state(StaffFlow.pin)
-    await state.update_data(wanted_role=role.value)
+    await state.update_data(wanted_role=role.value, pin_fails=0)
     await message.answer(PIN_PROMPT)
