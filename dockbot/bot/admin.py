@@ -210,7 +210,7 @@ async def show_norms(query: CallbackQuery, engine: Engine) -> None:
         rows.append(
             [
                 InlineKeyboardButton(
-                    text=f"{label} · {choice} мин",
+                    text=f"{label} {choice} мин",
                     callback_data=f"ad:norm:{code}:{choice}",
                 )
                 for choice in NORM_CHOICES[:2]
@@ -219,7 +219,7 @@ async def show_norms(query: CallbackQuery, engine: Engine) -> None:
         rows.append(
             [
                 InlineKeyboardButton(
-                    text=f"{label} · {choice}",
+                    text=f"{label} {choice}",
                     callback_data=f"ad:norm:{code}:{choice}",
                 )
                 for choice in NORM_CHOICES[2:]
@@ -234,7 +234,7 @@ async def show_norms(query: CallbackQuery, engine: Engine) -> None:
     ]
     rows.append(step_row[:2])
     rows.append(step_row[2:])
-    rows.append([InlineKeyboardButton(text="«« Назад", callback_data="ad:settings")])
+    rows.append([InlineKeyboardButton(text="Назад", callback_data="ad:settings")])
     rows.append([InlineKeyboardButton(text="В меню", callback_data=MENU)])
     await _answer(
         query,
@@ -320,7 +320,7 @@ async def slot_gates(query: CallbackQuery, engine: Engine) -> None:
         ]
         for gate in active
     ]
-    rows.append([InlineKeyboardButton(text="«« Назад", callback_data="ad:slots")])
+    rows.append([InlineKeyboardButton(text="Назад", callback_data="ad:slots")])
     rows.append([InlineKeyboardButton(text="В меню", callback_data=MENU)])
     await _answer(
         query,
@@ -474,7 +474,7 @@ async def staff_card(query: CallbackQuery, engine: Engine) -> None:
                     text="Отозвать доступ", callback_data=f"ad:revoke:{person.id}"
                 )
             ],
-            [InlineKeyboardButton(text="«« Назад", callback_data="ad:staff")],
+            [InlineKeyboardButton(text="Назад", callback_data="ad:staff")],
             [InlineKeyboardButton(text="В меню", callback_data=MENU)],
         ]
     )
@@ -618,7 +618,7 @@ def _gates_markup(gates: list) -> InlineKeyboardMarkup:
         rows.append(
             [
                 InlineKeyboardButton(
-                    text=f"Ворота {gate.code} · {'вкл' if gate.is_active else 'выкл'}",
+                    text=f"Ворота {gate.code} {'вкл' if gate.is_active else 'выкл'}",
                     callback_data=f"ad:gate-toggle:{gate.id}",
                 )
             ]
@@ -718,7 +718,7 @@ async def _show_board(
     rows.append(
         [
             InlineKeyboardButton(
-                text="«« Назад",
+                text="Назад",
                 callback_data=f"ad:slot-day:{day.isoformat()}",
             )
         ]
@@ -776,7 +776,7 @@ async def _show_staff(event: Message | CallbackQuery, engine: Engine) -> None:
         rows.append(
             [
                 InlineKeyboardButton(
-                    text=f"{ROLE_LABEL[person.role]} · {person.display_name} · {bound}",
+                    text=f"{ROLE_LABEL[person.role]} {person.display_name} {bound}",
                     callback_data=f"ad:staff-open:{person.id}",
                 )
             ]
@@ -832,7 +832,7 @@ async def _show_settings(event: Message | CallbackQuery, engine: Engine) -> None
             for minutes in BUFFER_CHOICES
         ],
         [InlineKeyboardButton(text="Нормативы груза", callback_data="ad:norms")],
-        [InlineKeyboardButton(text="Изменить адрес", callback_data="ad:address")],
+        [InlineKeyboardButton(text="Изменить данные", callback_data="ad:address")],
         [InlineKeyboardButton(text="Отправить геопозицию", callback_data="ad:point")],
         [InlineKeyboardButton(text="В меню", callback_data=MENU)],
     ]

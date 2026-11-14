@@ -13,6 +13,8 @@ from sqlalchemy.engine import Engine
 
 from dockbot.access import AccessDenied, active_staff
 from dockbot.booking import (
+    DAY_TAKEN,
+    BookingError,
     FieldError,
     SiteNotConfigured,
     SlotTaken,
@@ -31,7 +33,6 @@ from dockbot.booking import (
 )
 from dockbot.bot.keyboard import keyboard_for
 from dockbot.bot.ui import (
-    ABORT,
     CARGO_PREFIX,
     DATE_PREFIX,
     GATE_PREFIX,
@@ -257,6 +258,15 @@ async def desk_name(message: Message, state: FSMContext, engine: Engine) -> None
         await message.answer(str(exc))
         await _slots(message, state, engine)
         return
+    except FieldError as exc:
+        await message.answer(str(exc))
+        return
+    except BookingError as exc:
+        await message.answer(str(exc))
+        if str(exc) == DAY_TAKEN:
+            await state.set_state(DeskFlow.plate)
+            await message.answer("Укажите другой госномер, например А123ВС178.")
+        return
     except SiteNotConfigured as exc:
         await state.clear()
         await message.answer(str(exc), reply_markup=keyboard_for(StaffRole.admin))
@@ -268,13 +278,6 @@ async def desk_name(message: Message, state: FSMContext, engine: Engine) -> None
         caption=pass_caption(trip, zone) + "\n" + _NOTE,
     )
     await message.answer(_NOTE, reply_markup=keyboard_for(StaffRole.admin))
-
-
-@router.callback_query(DeskFlow.date, F.data == ABORT)
-@router.callback_query(DeskFlow.vehicle, F.data == ABORT)
-async def desk_abort(query: CallbackQuery, state: FSMContext) -> None:
-    await state.clear()
-    await reply(query, "Запись без чата отменена.", keyboard_for(StaffRole.admin))
 
 
 async def _dates(event, state: FSMContext, engine: Engine) -> None:

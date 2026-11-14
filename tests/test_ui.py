@@ -3,11 +3,23 @@
 from __future__ import annotations
 
 import unittest
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from dockbot.booking import FieldError, Trip, normalize_plate
+from dockbot.booking import FieldError, GateChoice, SlotChoice, Trip, normalize_plate
 from dockbot.bot.keyboard import button_labels, keyboard_for
+from dockbot.bot.ui import (
+    back_menu_markup,
+    cancel_step_markup,
+    card_markup,
+    cargo_markup,
+    dates_markup,
+    gates_markup,
+    slots_markup,
+    summary_markup,
+    trips_markup,
+    vehicle_markup,
+)
 from dockbot.models import BookingStatus, StaffRole
 from dockbot.present import day_button, trip_button
 from dockbot.reminders import late_text, reminder_text
@@ -58,7 +70,38 @@ class ScreenTests(unittest.TestCase):
     def test_date_and_trip_buttons_are_short_russian(self) -> None:
         self.assertEqual(day_button(date(2026, 11, 9)), "Пн 09.11")
         label = trip_button(_trip(BookingStatus.confirmed, 9), ZONE)
-        self.assertEqual(label, "12.11 09:00 · В2 · А123АА77 · 🟢 Подтверждено")
+        self.assertEqual(label, "12.11 09:00 В2 А123АА77 Подтверждено")
+        banned = ("«", "»", "◀", "▶", "·", "🟡", "🟢", "pallets")
+        trip = _trip(BookingStatus.confirmed, 9)
+        start = trip.slot_start
+        slot = SlotChoice(1, "2", "Ворота 2", start, start + timedelta(hours=1))
+        markups = [
+            back_menu_markup(),
+            cancel_step_markup(),
+            vehicle_markup(),
+            cargo_markup({"pallets": 60}),
+            dates_markup([date(2026, 11, 9)]),
+            gates_markup([GateChoice(1, "2", "Ворота 2")]),
+            slots_markup([slot], ZONE, start),
+            summary_markup(False),
+            trips_markup([trip], ZONE, 0),
+            card_markup(trip, True),
+        ]
+        for markup in markups:
+            for row in markup.inline_keyboard:
+                for button in row:
+                    for mark in banned:
+                        self.assertNotIn(mark, button.text, button.text)
+        labels = [
+            button.text
+            for markup in markups
+            for row in markup.inline_keyboard
+            for button in row
+        ]
+        self.assertIn("В меню", labels)
+        self.assertIn("Изменить данные", labels)
+        self.assertIn("Паллеты 60 мин", labels)
+        self.assertIn("Назад", labels)
 
     def test_shift_filters_and_reminder_copy(self) -> None:
         trips = [
