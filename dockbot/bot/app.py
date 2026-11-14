@@ -12,6 +12,7 @@ from sqlalchemy.engine import Engine
 
 from dockbot.bot.driver import router as driver_router
 from dockbot.bot.mine import router as mine_router
+from dockbot.bot.staff import router as staff_router
 from dockbot.bot.wizard import router as wizard_router
 from dockbot.config import Settings
 
@@ -36,6 +37,7 @@ def build_dispatcher(engine: Engine) -> Dispatcher:
     dispatcher = Dispatcher(storage=MemoryStorage())
     dispatcher.update.middleware(EngineMiddleware(engine))
     dispatcher.include_router(driver_router)
+    dispatcher.include_router(staff_router)
     dispatcher.include_router(wizard_router)
     dispatcher.include_router(mine_router)
     return dispatcher
