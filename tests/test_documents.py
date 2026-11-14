@@ -114,6 +114,27 @@ class DocumentReadTests(unittest.TestCase):
             "7d4322bd2a7749724879683fc3912cb542f19906c83bcc1a52132556427170b2",
         )
 
+    def test_windows_startup_copies_the_bundled_engine_without_network(self) -> None:
+        def urlopen(request, timeout=0):
+            raise AssertionError("network")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "tesseract"
+            with (
+                patch("dockbot.documents.platform.system", return_value="Windows"),
+                patch("dockbot.documents.platform.machine", return_value="AMD64"),
+                patch("dockbot.documents.urllib.request.urlopen", urlopen),
+            ):
+                installed = documents.ensure_local_engine(root)
+                documents.ensure_local_engine(root)
+            self.assertEqual(installed.binary, root / "tesseract.exe")
+            self.assertTrue((root / "tessdata" / "rus.traineddata").is_file())
+            self.assertTrue((root / "tessdata" / "eng.traineddata").is_file())
+            self.assertEqual(
+                documents._sha256(root / "tesseract.exe"),
+                "5f26f0ce42679b2baebdf636c27353457590b799a96eed79f5a7859862a6aa76",
+            )
+
     def test_local_engine_reads_the_card_without_a_system_install(self) -> None:
         script = (
             "#!/bin/sh\n"

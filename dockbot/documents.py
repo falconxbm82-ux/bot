@@ -1,7 +1,9 @@
 """Сверка фото документа с госномером и ФИО.
 
-Текст читает локальный Tesseract. Если в системе нет сборки с русским
-и английским, при старте она скачивается в .venv/tesseract.
+Текст читает локальный Tesseract. На Windows движок с русским и
+английским лежит в репозитории и при старте копируется в .venv/tesseract.
+Если копии нет, та же сборка скачивается. Сбой пишется в журнал отдельной
+строкой.
 Платного API и новых секретов нет. Неуверенный кадр не подменяет сверку:
 фото остаётся, результат подтверждает водитель.
 Если программу так и не удалось подготовить, причина пишется в журнал.
@@ -16,7 +18,10 @@ import os
 import platform
 import re
 import shutil
+import subprocess
+import sys
 import tarfile
+import tempfile
 import threading
 import urllib.error
 import urllib.request
@@ -135,6 +140,16 @@ _ENGINE_SPECS = {
     ),
 }
 ENGINE_ROOT = PROJECT_ROOT / ".venv" / "tesseract"
+_BUNDLE = Path(__file__).resolve().parent / "vendor" / "tesseract"
+_EXE_SHA256 = {
+    "tesseract.exe": "5f26f0ce42679b2baebdf636c27353457590b799a96eed79f5a7859862a6aa76",
+}
+
+
+@dataclass(frozen=True)
+class OcrEngine:
+    binary: Path
+    tessdata: Path | None = None
 _probe_cache: tuple[object | None, str | None, set[str]] | None = None
 _probe_lock = threading.Lock()
 
@@ -234,7 +249,7 @@ def prepare_ocr() -> None:
     try:
         engine, gap, languages = _probe()
     except Exception as exc:
-        log.error("document OCR is unavailable: %s", exc.__class__.__name__)
+        log.error("document OCR is unavailable: %s", _short(exc))
         return
     if engine is None:
         log.error("document OCR is unavailable: %s", gap)
@@ -244,14 +259,24 @@ def prepare_ocr() -> None:
 
 
 def ensure_local_engine(root: Path | None = None) -> LocalEngine:
-    """Скачать переносной Tesseract и rus+eng в .venv, если их ещё нет."""
+    """Положить переносной Tesseract и rus+eng в .venv.
+
+    Сначала копируется сборка из репозитория. Скачивание — только если
+    её нет. Каталог создаётся до сети, ошибка не проглатывается.
+    """
     directory = root or ENGINE_ROOT
     ready = _ready_local(directory)
     if ready is not None:
         return ready
+    directory.mkdir(parents=True, exist_ok=True)
+    bundled = _install_bundle(directory)
+    if bundled is not None:
+        return bundled
     spec = _engine_spec()
     if spec is None:
-        raise RuntimeError("no portable Tesseract build for this system")
+        raise RuntimeError(
+            f"no portable Tesseract build for {platform.system()} {platform.machine()}"
+        )
     log.info("document OCR: fetching engine into %s", directory)
     _extract_engine(_download(spec.asset), directory, spec.binary_name)
     tessdata = directory / "tessdata"
@@ -259,11 +284,13 @@ def ensure_local_engine(root: Path | None = None) -> LocalEngine:
         _write_bytes(tessdata / name, _download(asset))
     ready = _ready_local(directory)
     if ready is None:
-        raise RuntimeError("local Tesseract is missing rus.traineddata after fetch")
+        raise RuntimeError(
+            "local Tesseract files did not match the expected checksums"
+        )
     return ready
 
 
-def _probe() -> tuple[object | None, str | None, set[str]]:
+def _probe() -> tuple[OcrEngine | None, str | None, set[str]]:
     global _probe_cache
     # Alembic fileConfig disables loggers created before the migration.
     log.disabled = False
@@ -273,76 +300,117 @@ def _probe() -> tuple[object | None, str | None, set[str]]:
         return _probe_cache
 
 
-def _locate() -> tuple[object | None, str | None, set[str]]:
-    try:
-        import pytesseract
-    except ImportError:
-        return (None, ocr_gap(False, None), set())
+def _locate() -> tuple[OcrEngine | None, str | None, set[str]]:
     local = _ready_local(ENGINE_ROOT)
     if local is not None:
-        return _bind(pytesseract, local)
-    system = _system_reading(pytesseract)
+        bound = _activate(local.binary, local.tessdata)
+        if bound[0] is not None:
+            return bound
+    system = _system_reading()
     if system is not None:
         return system
     try:
         local = ensure_local_engine(ENGINE_ROOT)
     except Exception as exc:
-        reason = str(exc).splitlines()[0][:200]
+        reason = _short(exc)
+        log.error("document OCR fetch failed: %s", reason)
         gap = f"{ocr_gap(False, None)} Automatic fetch failed: {reason}"
         return (None, gap, set())
-    return _bind(pytesseract, local)
+    return _activate(local.binary, local.tessdata)
 
 
-def _bind(pytesseract, local: LocalEngine) -> tuple[object | None, str | None, set[str]]:
-    pytesseract.pytesseract.tesseract_cmd = str(local.binary)
-    os.environ["TESSDATA_PREFIX"] = str(local.tessdata)
-    languages = _languages(pytesseract)
+def _activate(
+    binary: Path, tessdata: Path | None
+) -> tuple[OcrEngine | None, str | None, set[str]]:
+    languages, error = _list_langs(binary, tessdata)
+    if error:
+        log.error("document OCR could not start: %s", error)
+        gap = f"{ocr_gap(False, None)} {error}"
+        return (None, gap, languages)
     gap = ocr_gap(True, languages)
     if gap:
         return (None, gap, languages)
-    return (pytesseract, None, languages)
+    return (OcrEngine(binary, tessdata), None, languages)
 
 
-def _system_reading(pytesseract) -> tuple[object, None, set[str]] | None:
-    if not _point_at_tesseract(pytesseract):
+def _system_reading() -> tuple[OcrEngine, None, set[str]] | None:
+    binary = _system_binary()
+    if binary is None:
         return None
-    prefix = os.environ.get("TESSDATA_PREFIX")
-    own = str((ENGINE_ROOT / "tessdata").resolve()) if ENGINE_ROOT.exists() else ""
-    hidden = False
-    if prefix and own and str(Path(prefix).resolve()) == own:
-        os.environ.pop("TESSDATA_PREFIX", None)
-        hidden = True
-    languages = _languages(pytesseract)
-    if ocr_gap(True, languages) is None:
-        return (pytesseract, None, languages)
-    if hidden and prefix is not None:
-        os.environ["TESSDATA_PREFIX"] = prefix
+    languages, error = _list_langs(binary, None)
+    if error or ocr_gap(True, languages) is not None:
+        return None
+    return (OcrEngine(binary, None), None, languages)
+
+
+def _system_binary() -> Path | None:
+    found = shutil.which("tesseract")
+    if found and os.path.isfile(found):
+        return Path(found)
+    for candidate in _WINDOWS_TESSERACT:
+        if os.path.isfile(candidate):
+            return Path(candidate)
     return None
 
 
-def _point_at_tesseract(pytesseract) -> bool:
-    found = shutil.which("tesseract")
-    if found:
-        pytesseract.pytesseract.tesseract_cmd = found
-        return True
-    for candidate in _WINDOWS_TESSERACT:
-        if os.path.isfile(candidate):
-            pytesseract.pytesseract.tesseract_cmd = candidate
-            return True
-    command = str(getattr(pytesseract.pytesseract, "tesseract_cmd", "") or "")
-    return bool(command and os.path.isfile(command))
-
-
-def _languages(pytesseract) -> set[str]:
+def _list_langs(
+    binary: Path, tessdata: Path | None
+) -> tuple[set[str], str | None]:
+    command = [str(binary), "--list-langs"]
+    if tessdata is not None:
+        command.extend(["--tessdata-dir", str(tessdata)])
     try:
-        return set(pytesseract.get_languages(config=""))
-    except Exception:
-        return set()
+        proc = _spawn(command)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return set(), _short(exc)
+    if proc.returncode not in (0, 1):
+        detail = _stderr_line(proc.stderr) or f"exit {proc.returncode}"
+        return set(), detail
+    languages = {
+        line.strip()
+        for line in proc.stdout.decode("utf-8", "replace").splitlines()
+        if re.fullmatch(r"[a-z_]+", line.strip())
+    }
+    return languages, None
+
+
+def _install_bundle(directory: Path) -> LocalEngine | None:
+    """Скопировать Windows-сборку из репозитория. None — её здесь нет."""
+    spec = _engine_spec()
+    if spec is None or spec.binary_name != "tesseract.exe":
+        return None
+    source_exe = _BUNDLE / "tesseract.exe"
+    if not source_exe.is_file():
+        return None
+    log.info("document OCR: installing bundled engine into %s", directory)
+    _write_bytes(directory / "tesseract.exe", source_exe.read_bytes())
+    (directory / "tesseract.exe").chmod(0o755)
+    for name in _LANG_FILES:
+        source = _BUNDLE / "tessdata" / name
+        if not source.is_file():
+            log.error("document OCR: bundled %s is missing", name)
+            return None
+        _write_bytes(directory / "tessdata" / name, source.read_bytes())
+    licenses = _BUNDLE / "LICENSES"
+    if licenses.is_dir():
+        for item in licenses.iterdir():
+            if item.is_file():
+                _write_bytes(directory / "LICENSES" / item.name, item.read_bytes())
+    ready = _ready_local(directory)
+    if ready is None:
+        log.error("document OCR: bundled engine checksum did not match")
+        return None
+    return ready
 
 
 def _engine_spec() -> _EngineSpec | None:
     system = platform.system().lower()
     machine = platform.machine().lower()
+    # 64-bit Windows reports AMD64. The bundled executable is x64.
+    if system == "windows":
+        if sys.maxsize <= 2**32 or machine not in {"amd64", "x86_64", "x64"}:
+            return None
+        return _ENGINE_SPECS.get("windows")
     if machine not in {"amd64", "x86_64"}:
         return None
     return _ENGINE_SPECS.get(system)
@@ -356,6 +424,9 @@ def _ready_local(root: Path) -> LocalEngine | None:
     tessdata = root / "tessdata"
     if not binary.is_file():
         return None
+    expected_exe = _EXE_SHA256.get(spec.binary_name)
+    if expected_exe is not None and _sha256(binary) != expected_exe:
+        return None
     for name, asset in _LANG_FILES.items():
         path = tessdata / name
         if not path.is_file() or _sha256(path) != asset.sha256:
@@ -364,16 +435,21 @@ def _ready_local(root: Path) -> LocalEngine | None:
 
 
 def _download(asset: _Asset) -> bytes:
-    request = urllib.request.Request(asset.url, headers={"User-Agent": "dockbot"})
+    request = urllib.request.Request(
+        asset.url,
+        headers={"User-Agent": "Mozilla/5.0 (compatible; DockBot/1.0)"},
+    )
     try:
         with urllib.request.urlopen(request, timeout=120) as response:
             payload = _read_limited(response, _DOWNLOAD_LIMIT)
     except urllib.error.HTTPError as exc:
         raise RuntimeError(f"download failed (HTTP {exc.code})") from exc
     except urllib.error.URLError as exc:
-        raise RuntimeError(
-            f"download failed ({exc.reason.__class__.__name__})"
-        ) from exc
+        reason = getattr(exc, "reason", None)
+        name = reason.__class__.__name__ if reason is not None else "URLError"
+        raise RuntimeError(f"download failed ({name})") from exc
+    except (TimeoutError, OSError) as exc:
+        raise RuntimeError(f"download failed ({exc.__class__.__name__})") from exc
     if hashlib.sha256(payload).hexdigest() != asset.sha256:
         raise RuntimeError("download checksum did not match")
     return payload
@@ -443,7 +519,9 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _read_text(engine, image: bytes, plate: str, driver_name: str, languages: set[str]) -> str:
+def _read_text(
+    engine: OcrEngine, image: bytes, plate: str, driver_name: str, languages: set[str]
+) -> str:
     if "rus" in languages and "eng" in languages:
         lang = "rus+eng"
     elif "rus" in languages:
@@ -455,13 +533,9 @@ def _read_text(engine, image: bytes, plate: str, driver_name: str, languages: se
     for view in _views(image):
         for psm in (6, 4):
             try:
-                text = engine.image_to_string(
-                    view, lang=lang, config=f"--oem 1 --psm {psm}"
-                )
-            except Exception as exc:
-                log.error(
-                    "document OCR pass failed: %s", exc.__class__.__name__
-                )
+                text = _ocr_image(engine, view, lang, psm)
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                log.error("document OCR pass failed: %s", _short(exc))
                 continue
             rank = _rank(text, plate, driver_name)
             if rank > best_rank:
@@ -469,6 +543,59 @@ def _read_text(engine, image: bytes, plate: str, driver_name: str, languages: se
             if rank[0] >= 3:
                 return text
     return best
+
+
+def _ocr_image(engine: OcrEngine, image: Image.Image, lang: str, psm: int) -> str:
+    with tempfile.TemporaryDirectory() as tmp:
+        folder = Path(tmp)
+        source = folder / "page.png"
+        image.save(source, format="PNG")
+        output = folder / "out"
+        command = [
+            str(engine.binary),
+            str(source),
+            str(output),
+            "-l",
+            lang,
+            "--oem",
+            "1",
+            "--psm",
+            str(psm),
+        ]
+        if engine.tessdata is not None:
+            command.extend(["--tessdata-dir", str(engine.tessdata)])
+        proc = _spawn(command)
+        text_path = Path(str(output) + ".txt")
+        if text_path.is_file():
+            return text_path.read_text(encoding="utf-8", errors="replace")
+        if proc.returncode != 0:
+            detail = _stderr_line(proc.stderr) or f"exit {proc.returncode}"
+            log.error("document OCR pass failed: %s", detail)
+        return ""
+
+
+def _spawn(command: list[str]) -> subprocess.CompletedProcess[bytes]:
+    kwargs: dict[str, object] = {
+        "capture_output": True,
+        "timeout": 60,
+        "check": False,
+        "stdin": subprocess.DEVNULL,
+    }
+    if sys.platform == "win32":
+        kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    return subprocess.run(command, **kwargs)
+
+
+def _stderr_line(payload: bytes | None) -> str:
+    if not payload:
+        return ""
+    line = payload.decode("utf-8", "replace").splitlines()
+    return line[0][:200] if line else ""
+
+
+def _short(exc: BaseException) -> str:
+    text = str(exc).splitlines()[0].strip() if str(exc).strip() else ""
+    return (text or exc.__class__.__name__)[:200]
 
 
 def _views(image: bytes) -> list[Image.Image]:
