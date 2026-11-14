@@ -106,6 +106,22 @@ def require_role(engine: Engine, telegram_id: int, role: StaffRole) -> StaffMemb
     return person
 
 
+def logout_staff(engine: Engine, telegram_id: int) -> bool:
+    """Снимает Telegram ID этого чата. PIN и чужие привязки не меняет."""
+    with Session(engine) as session:
+        with session.begin():
+            row = session.scalar(
+                select(StaffUser)
+                .where(StaffUser.telegram_id == telegram_id)
+                .with_for_update()
+            )
+            if row is None:
+                return False
+            row.telegram_id = None
+    log.info("staff logged out telegram_id=%s", telegram_id)
+    return True
+
+
 def enter_pin(engine: Engine, telegram_id: int, pin: str) -> StaffMember:
     """Первый успешный PIN записывает пустой Telegram ID и не затирает чужой."""
     secret = pin.strip()

@@ -19,7 +19,8 @@ from aiogram.types import (
 )
 from sqlalchemy.engine import Engine
 
-from dockbot.access import AccessDenied, active_staff, enter_pin
+from dockbot.access import AccessDenied, active_staff, enter_pin, logout_staff
+from dockbot.bot.driver import driver_menu
 from dockbot.booking import SiteNotConfigured, Trip
 from dockbot.checkpoint import (
     PassNotFound,
@@ -46,6 +47,7 @@ router = Router(name="staff")
 
 CHECK = "staff:check"
 SHIFT = "staff:shift"
+LOGOUT = "staff:out"
 ARRIVED_PREFIX = "sf:a:"
 UNLOADING_PREFIX = "sf:u:"
 COMPLETED_PREFIX = "sf:c:"
@@ -60,6 +62,7 @@ UNREADABLE = (
 NOT_FOUND = "Пропуск не найден."
 REJECTED = "Этот переход недоступен."
 SIGNED_IN = "Вход выполнен."
+LOGGED_OUT = "Вы вышли из роли."
 
 
 class StaffFlow(StatesGroup):
@@ -70,16 +73,39 @@ class StaffFlow(StatesGroup):
 def menu_rows(role: StaffRole) -> list[list[InlineKeyboardButton]]:
     """Охрана проверяет пропуск. Склад открывает смену. Чужую кнопку роль не видит."""
     if role is StaffRole.security:
-        return [
+        rows = [
             [InlineKeyboardButton(text="Проверить пропуск", callback_data=CHECK)]
         ]
-    if role is StaffRole.warehouse:
-        return [[InlineKeyboardButton(text="Экран смены", callback_data=SHIFT)]]
-    return []
+    elif role is StaffRole.warehouse:
+        rows = [[InlineKeyboardButton(text="Экран смены", callback_data=SHIFT)]]
+    else:
+        return []
+    rows.append([InlineKeyboardButton(text="Выйти из роли", callback_data=LOGOUT)])
+    return rows
 
 
 def staff_menu(role: StaffRole) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=menu_rows(role))
+
+
+@router.message(Command("logout"))
+async def logout_command(message: Message, state: FSMContext, engine: Engine) -> None:
+    user = message.from_user
+    if user is None:
+        await message.answer(DENIED)
+        return
+    await _leave(message, state, engine, user.id)
+
+
+@router.callback_query(F.data == LOGOUT)
+async def logout_button(query: CallbackQuery, state: FSMContext, engine: Engine) -> None:
+    user = query.from_user
+    if user is None:
+        await _reply(query, DENIED)
+        return
+    await state.clear()
+    await asyncio.to_thread(logout_staff, engine, user.id)
+    await _reply(query, LOGGED_OUT, driver_menu())
 
 
 @router.message(Command("staff"))
@@ -387,6 +413,14 @@ async def _deliver(
         return
     for page in pages:
         await message.answer(page.text, reply_markup=_page_markup(page, zone))
+
+
+async def _leave(
+    message: Message, state: FSMContext, engine: Engine, telegram_id: int
+) -> None:
+    await state.clear()
+    await asyncio.to_thread(logout_staff, engine, telegram_id)
+    await message.answer(LOGGED_OUT, reply_markup=driver_menu())
 
 
 async def _guard(query: CallbackQuery, state: FSMContext, engine: Engine):
