@@ -29,7 +29,7 @@ from dockbot.checkpoint import (
     load_trip,
     read_pass_image,
 )
-from dockbot.models import BookingStatus
+from dockbot.models import BookingStatus, StaffRole
 from dockbot.present import card_text
 from dockbot.shiftboard import (
     ShiftPage,
@@ -67,15 +67,19 @@ class StaffFlow(StatesGroup):
     checkpoint = State()
 
 
-def menu_rows() -> list[list[InlineKeyboardButton]]:
-    return [
-        [InlineKeyboardButton(text="Проверить пропуск", callback_data=CHECK)],
-        [InlineKeyboardButton(text="Экран смены", callback_data=SHIFT)],
-    ]
+def menu_rows(role: StaffRole) -> list[list[InlineKeyboardButton]]:
+    """Охрана проверяет пропуск. Склад открывает смену. Чужую кнопку роль не видит."""
+    if role is StaffRole.security:
+        return [
+            [InlineKeyboardButton(text="Проверить пропуск", callback_data=CHECK)]
+        ]
+    if role is StaffRole.warehouse:
+        return [[InlineKeyboardButton(text="Экран смены", callback_data=SHIFT)]]
+    return []
 
 
-def staff_menu() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=menu_rows())
+def staff_menu(role: StaffRole) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=menu_rows(role))
 
 
 @router.message(Command("staff"))
@@ -90,7 +94,7 @@ async def staff_entry(message: Message, state: FSMContext, engine: Engine) -> No
         await state.set_state(StaffFlow.pin)
         await message.answer(PIN_PROMPT)
         return
-    await message.answer(SIGNED_IN, reply_markup=staff_menu())
+    await message.answer(SIGNED_IN, reply_markup=staff_menu(person.role))
 
 
 @router.message(StaffFlow.pin, F.photo)
@@ -105,17 +109,21 @@ async def staff_pin(message: Message, state: FSMContext, engine: Engine) -> None
     if user is None or text.startswith("/"):
         return
     try:
-        await asyncio.to_thread(enter_pin, engine, user.id, text)
+        person = await asyncio.to_thread(enter_pin, engine, user.id, text)
     except AccessDenied:
         await message.answer(DENIED)
         return
     await state.clear()
-    await message.answer(SIGNED_IN, reply_markup=staff_menu())
+    await message.answer(SIGNED_IN, reply_markup=staff_menu(person.role))
 
 
 @router.callback_query(F.data == CHECK)
 async def ask_pass(query: CallbackQuery, state: FSMContext, engine: Engine) -> None:
-    if not await _guard(query, state, engine):
+    person = await _guard(query, state, engine)
+    if person is None:
+        return
+    if person.role is not StaffRole.security:
+        await _reply(query, DENIED)
         return
     await state.set_state(StaffFlow.checkpoint)
     await _reply(query, PASS_PROMPT)
@@ -123,7 +131,11 @@ async def ask_pass(query: CallbackQuery, state: FSMContext, engine: Engine) -> N
 
 @router.callback_query(F.data == SHIFT)
 async def show_shift(query: CallbackQuery, state: FSMContext, engine: Engine) -> None:
-    if not await _guard(query, state, engine):
+    person = await _guard(query, state, engine)
+    if person is None:
+        return
+    if person.role is not StaffRole.warehouse:
+        await _reply(query, DENIED)
         return
     await state.set_state(None)
     await _send_shift(query, engine)
@@ -134,7 +146,12 @@ async def pass_photo(message: Message, state: FSMContext, engine: Engine) -> Non
     user = message.from_user
     if user is None or not message.photo:
         return
-    if not await _guard_message(message, state, engine):
+    person = await _guard_message(message, state, engine)
+    if person is None:
+        return
+    if person.role is not StaffRole.security:
+        await state.clear()
+        await message.answer(DENIED)
         return
     image = await _photo_bytes(message)
     if image is None:
@@ -162,7 +179,12 @@ async def pass_pin(message: Message, state: FSMContext, engine: Engine) -> None:
     text = (message.text or "").strip()
     if user is None or text.startswith("/"):
         return
-    if not await _guard_message(message, state, engine):
+    person = await _guard_message(message, state, engine)
+    if person is None:
+        return
+    if person.role is not StaffRole.security:
+        await state.clear()
+        await message.answer(DENIED)
         return
     try:
         trip = await asyncio.to_thread(find_pass, engine, user.id, pin=text)
@@ -178,7 +200,11 @@ async def pass_pin(message: Message, state: FSMContext, engine: Engine) -> None:
 
 @router.callback_query(F.data.startswith(OPEN_PREFIX))
 async def open_row(query: CallbackQuery, state: FSMContext, engine: Engine) -> None:
-    if not await _guard(query, state, engine):
+    person = await _guard(query, state, engine)
+    if person is None:
+        return
+    if person.role is not StaffRole.warehouse:
+        await _reply(query, DENIED)
         return
     booking_id = _id(query.data, OPEN_PREFIX)
     user = query.from_user
@@ -363,29 +389,29 @@ async def _deliver(
         await message.answer(page.text, reply_markup=_page_markup(page, zone))
 
 
-async def _guard(query: CallbackQuery, state: FSMContext, engine: Engine) -> bool:
+async def _guard(query: CallbackQuery, state: FSMContext, engine: Engine):
     user = query.from_user
     if user is None:
         await _reply(query, DENIED)
-        return False
+        return None
     person = await asyncio.to_thread(active_staff, engine, user.id)
     if person is None:
         await state.clear()
         await _reply(query, DENIED)
-        return False
-    return True
+        return None
+    return person
 
 
-async def _guard_message(message: Message, state: FSMContext, engine: Engine) -> bool:
+async def _guard_message(message: Message, state: FSMContext, engine: Engine):
     user = message.from_user
     if user is None:
-        return False
+        return None
     person = await asyncio.to_thread(active_staff, engine, user.id)
     if person is None:
         await state.clear()
         await message.answer(DENIED)
-        return False
-    return True
+        return None
+    return person
 
 
 async def _current(engine: Engine, telegram_id: int, booking_id: int) -> Trip | None:

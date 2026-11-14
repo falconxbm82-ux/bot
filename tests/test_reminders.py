@@ -304,6 +304,26 @@ class ReminderTests(unittest.TestCase):
         )
         self.assertEqual(len(self.sender.lates), 1)
 
+    def test_restarted_delivery_does_not_send_the_reminder_again(self) -> None:
+        slot = _moment(2026, 11, 20, 8)
+        booking_id = self._insert(slot, created_at=slot - timedelta(days=2))
+        now = due_time(slot, NotificationKind.h24)
+        self._deliver(booking_id, NotificationKind.h24, now)
+        self.assertEqual(len(self.sender.reminders), 1)
+        restarted = Recording()
+        deliver(
+            ENGINE,
+            booking_id,
+            NotificationKind.h24,
+            sender=restarted,
+            now=now,
+            latitude=LATITUDE,
+            longitude=LONGITUDE,
+            zone=ZONE,
+        )
+        self.assertEqual(restarted.reminders, [])
+        self.assertEqual(len(self.sender.reminders), 1)
+
     def test_second_delivery_does_not_repeat_a_sent_reminder(self) -> None:
         slot = _moment(2026, 11, 20, 8)
         booking_id = self._insert(slot, created_at=slot - timedelta(days=2))

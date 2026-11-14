@@ -1,7 +1,7 @@
 """Стартовый экран водителя: забронировать и мои брони.
 
-Кнопки охраны и кладовщика добавляются только если Telegram ID
-уже привязан к действующему сотруднику.
+Кнопка охраны или склада добавляется только если Telegram ID
+уже привязан к действующему сотруднику этой роли.
 """
 
 from __future__ import annotations
@@ -62,4 +62,4 @@ async def _menu(message: Message, engine: Engine) -> InlineKeyboardMarkup:
     person = await asyncio.to_thread(active_staff, engine, user.id)
     if person is None:
         return driver_menu()
-    return driver_menu(menu_rows())
+    return driver_menu(menu_rows(person.role))

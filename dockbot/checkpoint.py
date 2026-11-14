@@ -15,13 +15,14 @@ from sqlalchemy import select
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
-from dockbot.access import require_staff
+from dockbot.access import require_role, require_staff
 from dockbot.booking import Trip, _changed, _trip
 from dockbot.models import (
     TERMINAL_STATUSES,
     Booking,
     BookingStatus,
     BookingStatusEvent,
+    StaffRole,
     StatusSource,
 )
 from dockbot.qrscan import decode_qr
@@ -41,6 +42,13 @@ _STAMP = {
     BookingStatus.completed: "completed_at",
 }
 
+# «Прибыл» ставит охрана. «На воротах» и «Разгружен» ставит склад.
+_MARK_ROLE = {
+    BookingStatus.arrived: StaffRole.security,
+    BookingStatus.unloading: StaffRole.warehouse,
+    BookingStatus.completed: StaffRole.warehouse,
+}
+
 
 class PassNotFound(Exception):
     """Токен или PIN пропуска не найден. Статус не менялся."""
@@ -56,7 +64,7 @@ def allowed_next(status: BookingStatus) -> BookingStatus | None:
 
 def read_pass_image(engine: Engine, telegram_id: int, image: bytes) -> Trip | None:
     """Карточка по фото. Нечитаемый кадр возвращает None и ничего не пишет."""
-    require_staff(engine, telegram_id)
+    require_role(engine, telegram_id, StaffRole.security)
     token = decode_qr(image)
     if not token:
         return None
@@ -71,7 +79,7 @@ def find_pass(
     pin: str | None = None,
 ) -> Trip:
     """Активный пропуск, иначе последняя архивная запись с тем же PIN."""
-    require_staff(engine, telegram_id)
+    require_role(engine, telegram_id, StaffRole.security)
     with Session(engine) as session:
         booking = _lookup(session, token=token, pin=pin)
         if booking is None:
@@ -97,7 +105,10 @@ def apply_mark(
     now: datetime | None = None,
 ) -> Trip:
     """Условное обновление: проигравшая транзакция видит уже новый статус."""
-    require_staff(engine, telegram_id)
+    role = _MARK_ROLE.get(target)
+    if role is None:
+        raise TransitionRejected()
+    require_role(engine, telegram_id, role)
     moment = now or datetime.now(timezone.utc)
     if moment.tzinfo is None:
         raise TransitionRejected()
