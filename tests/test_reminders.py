@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import threading
 import unittest
@@ -266,13 +267,19 @@ class ReminderTests(unittest.TestCase):
         created = slot - timedelta(days=2)
         booking_id = self._insert(slot, created_at=created, plate="LATE1")
         now = slot + timedelta(minutes=15)
-        catch_up(
-            ENGINE,
-            sender=self.sender,
-            now=now,
-            latitude=LATITUDE,
-            longitude=LONGITUDE,
-            zone=ZONE,
+        # Alembic fileConfig отключает уже созданные журналы. Для проверки строки его включают обратно.
+        logging.getLogger("dockbot.reminders").disabled = False
+        with self.assertLogs("dockbot.reminders", level="INFO") as caught:
+            catch_up(
+                ENGINE,
+                sender=self.sender,
+                now=now,
+                latitude=LATITUDE,
+                longitude=LONGITUDE,
+                zone=ZONE,
+            )
+        self.assertTrue(
+            any(f"lateness recorded booking={booking_id}" in line for line in caught.output)
         )
         self.assertEqual(self.sender.reminders, [])
         self.assertEqual(len(self.sender.lates), 1)

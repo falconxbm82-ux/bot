@@ -143,22 +143,22 @@ class StaffTests(unittest.TestCase):
         self.assertIn("Экран смены", shown)
 
     def test_staff_pin_binds_empty_id_and_does_not_overwrite(self) -> None:
-        staff_id = self._staff(pin="2468")
-        person = enter_pin(ENGINE, STAFF_TG, "2468")
+        staff_id = self._staff(pin="246810")
+        person = enter_pin(ENGINE, STAFF_TG, "246810")
         self.assertEqual(person.telegram_id, STAFF_TG)
         self.assertEqual(person.role, StaffRole.security)
-        again = enter_pin(ENGINE, STAFF_TG, "2468")
+        again = enter_pin(ENGINE, STAFF_TG, "246810")
         self.assertEqual(again.id, person.id)
         with self.assertRaises(AccessDenied):
-            enter_pin(ENGINE, OTHER_TG, "2468")
+            enter_pin(ENGINE, OTHER_TG, "246810")
         with Session(ENGINE) as session:
             row = session.get(StaffUser, staff_id)
             assert row is not None
             self.assertEqual(row.telegram_id, STAFF_TG)
-            self.assertNotIn("2468", row.pin_hash)
+            self.assertNotIn("246810", row.pin_hash)
 
     def test_pass_pin_does_not_grant_staff_and_wrong_pin_is_generic(self) -> None:
-        self._staff(pin="2468", telegram_id=STAFF_TG)
+        self._staff(pin="246810", telegram_id=STAFF_TG)
         trip = self._book(TOMORROW, 8)
         with self.assertRaises(AccessDenied):
             enter_pin(ENGINE, OTHER_TG, trip.pass_pin)
@@ -173,7 +173,7 @@ class StaffTests(unittest.TestCase):
         assert person is not None
         self.assertEqual(person.role, StaffRole.security)
         with self.assertRaises(AccessDenied):
-            enter_pin(ENGINE, OTHER_TG, "2468")
+            enter_pin(ENGINE, OTHER_TG, "246810")
         with Session(ENGINE) as session:
             with session.begin():
                 row = session.scalar(
@@ -188,15 +188,15 @@ class StaffTests(unittest.TestCase):
         self.assertEqual(self._status(trip.id), BookingStatus.booked)
 
     def test_one_telegram_id_cannot_take_a_second_role(self) -> None:
-        self._staff(name="Охрана", pin="2468", telegram_id=STAFF_TG)
+        self._staff(name="Охрана", pin="246810", telegram_id=STAFF_TG)
         self._staff(
             name="Склад",
-            pin="1357",
+            pin="135790",
             role=StaffRole.warehouse,
             telegram_id=None,
         )
         with self.assertRaises(AccessDenied):
-            enter_pin(ENGINE, STAFF_TG, "1357")
+            enter_pin(ENGINE, STAFF_TG, "135790")
         with Session(ENGINE) as session:
             warehouse = session.scalar(
                 select(StaffUser).where(StaffUser.display_name == "Склад")
@@ -206,28 +206,28 @@ class StaffTests(unittest.TestCase):
         with self.assertRaises(IntegrityError):
             self._staff(
                 name="Вторая охрана",
-                pin="9753",
+                pin="975310",
                 telegram_id=STAFF_TG,
             )
 
     def test_config_hashes_pin_and_does_not_replace_a_bound_id(self) -> None:
-        spec = parse_staff_list("security:Охрана:2468")[0]
-        self.assertNotIn("2468", repr(spec))
+        spec = parse_staff_list("security:Охрана:246810")[0]
+        self.assertNotIn("246810", repr(spec))
         apply_staff(ENGINE, (spec,))
         with Session(ENGINE) as session:
             row = session.scalar(select(StaffUser))
             assert row is not None
             self.assertIsNone(row.telegram_id)
-            self.assertTrue(verify_pin("2468", row.pin_hash))
-            self.assertNotIn("2468", row.pin_hash)
-        apply_staff(ENGINE, (parse_staff_list("security:Охрана:2468:501")[0],))
-        apply_staff(ENGINE, (parse_staff_list("security:Охрана:2468:999")[0],))
+            self.assertTrue(verify_pin("246810", row.pin_hash))
+            self.assertNotIn("246810", row.pin_hash)
+        apply_staff(ENGINE, (parse_staff_list("security:Охрана:246810:501")[0],))
+        apply_staff(ENGINE, (parse_staff_list("security:Охрана:246810:999")[0],))
         with Session(ENGINE) as session:
             rows = session.scalars(select(StaffUser)).all()
             self.assertEqual(len(rows), 1)
             self.assertEqual(rows[0].telegram_id, STAFF_TG)
-            self.assertTrue(verify_pin("2468", rows[0].pin_hash))
-        apply_staff(ENGINE, (parse_staff_list("warehouse:Склад:1357:501")[0],))
+            self.assertTrue(verify_pin("246810", rows[0].pin_hash))
+        apply_staff(ENGINE, (parse_staff_list("warehouse:Склад:135790:501")[0],))
         with Session(ENGINE) as session:
             by_name = {
                 row.display_name: row.telegram_id
@@ -243,16 +243,19 @@ class StaffTests(unittest.TestCase):
         self.assertIsNone(only_id.pin)
         self.assertEqual(only_id.telegram_id, 42)
         for raw in (
-            "boss:Имя:2468",
+            "boss:Имя:246810",
             "security:Имя:12",
+            "security:Имя:12345",
+            "security:Имя:1234567",
+            "security:Имя:abcdef",
             "security:Имя::",
-            "security:А:2468:5;warehouse:Б:1357:5",
+            "security:А:246810:5;warehouse:Б:135790:5",
         ):
             with self.assertRaises(ConfigError):
                 parse_staff_list(raw)
 
     def test_unreadable_photo_and_wrong_pin_do_not_change_status(self) -> None:
-        self._staff(pin="2468", telegram_id=STAFF_TG)
+        self._staff(pin="246810", telegram_id=STAFF_TG)
         trip = self._book(TOMORROW, 8)
         blank = _blank_png()
         self.assertIsNone(decode_qr(b"not-a-picture"))
@@ -276,7 +279,7 @@ class StaffTests(unittest.TestCase):
             find_pass(ENGINE, OTHER_TG, pin=trip.pass_pin)
 
     def test_active_pin_wins_and_archive_does_not_mark_arrived(self) -> None:
-        self._staff(pin="2468", telegram_id=STAFF_TG)
+        self._staff(pin="246810", telegram_id=STAFF_TG)
         active = self._insert(
             start=_at(TODAY, 10),
             status=BookingStatus.booked,
@@ -318,7 +321,7 @@ class StaffTests(unittest.TestCase):
         self.assertIsNone(self._column(archived.id, "arrived_at"))
 
     def test_arrived_only_from_booked_or_confirmed_and_chain_is_forward(self) -> None:
-        self._staff(pin="2468", telegram_id=STAFF_TG)
+        self._staff(pin="246810", telegram_id=STAFF_TG)
         booked = self._book(TOMORROW, 8)
         self.assertEqual([item.label for item in checkpoint_actions(booked)], ["Прибыл"])
         self.assertEqual(row_actions(booked), ())
@@ -348,7 +351,7 @@ class StaffTests(unittest.TestCase):
         self.assertEqual(self._status(confirmed.id), BookingStatus.arrived)
 
     def test_gate_and_unloaded_follow_the_chain_and_free_the_slot(self) -> None:
-        self._staff(pin="2468", telegram_id=STAFF_TG)
+        self._staff(pin="246810", telegram_id=STAFF_TG)
         trip = self._book(TODAY, 10)
         self.assertEqual(trip.status, BookingStatus.confirmed)
         apply_mark(ENGINE, STAFF_TG, trip.id, BookingStatus.arrived, now=NOW)
@@ -407,7 +410,7 @@ class StaffTests(unittest.TestCase):
         self.assertEqual(notices, 0)
 
     def test_late_and_cancelled_cannot_move_backward(self) -> None:
-        self._staff(pin="2468", telegram_id=STAFF_TG)
+        self._staff(pin="246810", telegram_id=STAFF_TG)
         late = self._book(TOMORROW, 9)
         self._set_status(late.id, BookingStatus.late)
         found = find_pass(ENGINE, STAFF_TG, pin=late.pass_pin)
@@ -431,7 +434,7 @@ class StaffTests(unittest.TestCase):
         self.assertEqual(self._status(cancelled.id), BookingStatus.cancelled)
 
     def test_concurrent_arrival_keeps_one_status(self) -> None:
-        self._staff(pin="2468", telegram_id=STAFF_TG)
+        self._staff(pin="246810", telegram_id=STAFF_TG)
         trip = self._book(TOMORROW, 11)
         barrier = threading.Barrier(2)
         results: list[str] = []
@@ -456,7 +459,7 @@ class StaffTests(unittest.TestCase):
         self.assertEqual(self._staff_event_count(trip.id), 1)
 
     def test_shift_board_is_today_grouped_by_hour(self) -> None:
-        self._staff(pin="2468", telegram_id=STAFF_TG)
+        self._staff(pin="246810", telegram_id=STAFF_TG)
         self._insert(
             start=_at(TODAY, 8),
             status=BookingStatus.late,
@@ -523,7 +526,7 @@ class StaffTests(unittest.TestCase):
             load_shift(ENGINE, OTHER_TG, now=NOW)
 
     def test_empty_shift_says_there_are_no_records(self) -> None:
-        self._staff(pin="2468", telegram_id=STAFF_TG)
+        self._staff(pin="246810", telegram_id=STAFF_TG)
         _zone, day, trips = load_shift(ENGINE, STAFF_TG, now=NOW)
         pages = shift_pages(trips, ZONE, day)
         self.assertEqual(len(pages), 1)

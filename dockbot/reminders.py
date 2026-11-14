@@ -216,6 +216,8 @@ def _deliver_locked(
     prepared = _prepare(engine, booking_id, kind, now, zone)
     if prepared is None:
         return
+    if prepared.lateness:
+        log.info("lateness recorded booking=%s", booking_id)
     try:
         if kind is NotificationKind.late:
             sender.send_late(prepared.chat_id, prepared.text)
@@ -244,6 +246,7 @@ def _deliver_locked(
 class _Prepared:
     chat_id: int
     text: str
+    lateness: bool = False
 
 
 def _prepare(
@@ -265,11 +268,13 @@ def _prepare(
             gate = session.get(Gate, booking.gate_id)
             if gate is None:
                 return None
+            recorded_lateness = False
             if kind is NotificationKind.late:
                 if booking.status in _OPEN:
                     previous = booking.status
                     booking.status = BookingStatus.late
                     booking.late_at = now
+                    recorded_lateness = True
                     session.add(
                         BookingStatusEvent(
                             booking_id=booking.id,
@@ -316,7 +321,11 @@ def _prepare(
                     zone,
                     kind,
                 )
-            return _Prepared(chat_id=booking.driver_chat_id, text=text)
+            return _Prepared(
+                chat_id=booking.driver_chat_id,
+                text=text,
+                lateness=recorded_lateness,
+            )
 
 
 def _attempted(session: Session, booking: Booking, kind: NotificationKind) -> bool:

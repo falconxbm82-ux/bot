@@ -150,6 +150,7 @@ async def pass_photo(message: Message, state: FSMContext, engine: Engine) -> Non
         await message.answer(NOT_FOUND)
         return
     if trip is None:
+        log.info("pass qr was not recognized")
         await message.answer(UNREADABLE)
         return
     await _show_checkpoint(message, engine, trip)
