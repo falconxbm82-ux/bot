@@ -72,6 +72,43 @@ class DocumentReadTests(unittest.TestCase):
         self.assertTrue(reading.confident)
         self.assertEqual(reading.verdict, "match")
 
+    def test_sidorov_matches_despite_case_yo_and_latin_twins(self) -> None:
+        plate = "С777СМ77"
+        name = "Сидоров Сидор Сидорович"
+        image = _card("СИДОРОВ СИДОР СИДОРОВИЧ", "ГОСНОМЕР " + plate)
+        reading = read_document(image, plate, name)
+        self.assertTrue(reading.confident, reading.text)
+        self.assertEqual(reading.verdict, "match")
+        twins = str.maketrans({"С": "C", "М": "M", "с": "c", "м": "m"})
+        photo = "СИДОРОВ СИДОР СИДОРОВИЧ\nГОСНОМЕР С777СМ77".translate(twins)
+        self.assertIn("C777CM77", photo)
+        self.assertTrue(photo.startswith("C"))
+        self.assertEqual(judge(photo, plate, name).verdict, "match")
+        self.assertEqual(
+            judge(photo.casefold(), plate.casefold(), name.casefold()).verdict,
+            "match",
+        )
+        self.assertEqual(
+            judge(
+                "СИДОРОВ СИДОР СИДОРОВИЧ\nГОСНОМЕР С777СМ77",
+                plate.translate(twins),
+                name.translate(twins),
+            ).verdict,
+            "match",
+        )
+        self.assertEqual(
+            judge(
+                "СЕМЁНОВ СЕМЁН СЕМЁНОВИЧ\nГОСНОМЕР \u03f9777\u03f9\u039c77",
+                plate,
+                "Семенов Семен Семенович",
+            ).verdict,
+            "match",
+        )
+        self.assertEqual(
+            judge("ПЕТРОВ ПЁТР ПЕТРОВИЧ\nГОСНОМЕР С777СМ77", plate, name).verdict,
+            "mismatch",
+        )
+
     def test_different_name_on_the_same_plate_is_a_mismatch(self) -> None:
         image = _card("ИВАНОВ ИВАН ИВАНОВИЧ", "ГОСНОМЕР А123ВС178")
         reading = read_document(image, PLATE, "ыфсфыфс")

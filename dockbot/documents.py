@@ -23,6 +23,7 @@ import sys
 import tarfile
 import tempfile
 import threading
+import unicodedata
 import urllib.error
 import urllib.request
 import uuid
@@ -40,9 +41,23 @@ log = logging.getLogger(__name__)
 MATCH = "match"
 MISMATCH = "mismatch"
 
-_LATIN = str.maketrans(
-    "ABEKMHOPCTYX",
-    "АВЕКМНОРСТУХ",
+# Буквы номера и их двойники: латиница и греческие той же формы.
+# С/C, М/M и остальные не должны делать из той же строки чужое ФИО.
+# Лунную сигму переводим до NFKC: нормализация превращает её в обычную Σ.
+_PLATE_LETTERS = "АВЕКМНОРСТУХ"
+_LATIN_TWINS = "ABEKMHOPCTYX"
+_GREEK_TWINS = "\u0391\u0392\u0395\u0397\u039a\u039c\u039d\u039f\u03a1\u03a4\u03a5\u03a7\u03f9"
+_GREEK_TWINS_LOWER = "\u03b1\u03b2\u03b5\u03b7\u03ba\u03bc\u03bd\u03bf\u03c1\u03c4\u03c5\u03c7\u03f2"
+_TWIN_INDEX = (0, 1, 2, 5, 3, 4, 5, 6, 7, 9, 10, 11, 8)
+_HOMOGLYPHS = str.maketrans(
+    {
+        **{ord(src): _PLATE_LETTERS[i] for i, src in enumerate(_LATIN_TWINS)},
+        **{ord(src.lower()): _PLATE_LETTERS[i] for i, src in enumerate(_LATIN_TWINS)},
+        **{
+            ord(src): _PLATE_LETTERS[i]
+            for src, i in zip(_GREEK_TWINS + _GREEK_TWINS_LOWER, _TWIN_INDEX * 2)
+        },
+    }
 )
 _PLATE = re.compile(r"[АВЕКМНОРСТУХ]\d{3}[АВЕКМНОРСТУХ]{2}\d{2,3}")
 _NAME = re.compile(r"^[0-9a-f]{32}\.jpg$")
@@ -187,10 +202,10 @@ def ocr_gap(binary_found: bool, languages: set[str] | None) -> str | None:
 
 
 def judge(text: str, plate: str, driver_name: str) -> Reading:
-    """Сходится, только если на фото есть этот номер и ФИО.
+    """Сходится, только если на фото есть этот номер и это ФИО.
 
-    Буквы номера сверяются и в кириллице, и в латинице (А/A).
-    Другой распознанный госномер — расхождение.
+    Регистр, ё/е и латинские двойники кириллицы не различают ни ФИО, ни номер.
+    Другой распознанный госномер или другое ФИО — расхождение.
     Обрывок текста остаётся неуверенным.
     """
     folded = _fold(text)
@@ -706,8 +721,8 @@ def _different_name(text: str, driver_name: str) -> bool:
 
 def _name_tokens(text: str) -> list[str]:
     tokens: list[str] = []
-    for token in re.findall(r"[0-9A-Za-zА-Яа-яЁё]+", text):
-        soft = _soft(_fold(token))
+    for token in re.findall(r"[0-9A-ZА-Я]+", _letters(text)):
+        soft = token.casefold()
         if len(soft) < 3 or any(char.isdigit() for char in soft):
             continue
         if re.fullmatch(r"[а-яё]+", soft) is None or soft in _NAME_STOP:
@@ -729,13 +744,10 @@ def _name_present(text: str, driver_name: str) -> bool:
     parts = [_soft(part) for part in driver_name.split() if len(part) >= 3]
     if not parts:
         return False
-    tokens = [
-        _soft(_fold(token))
-        for token in re.findall(r"[0-9A-Za-zА-Яа-яЁё]+", text)
-    ]
+    tokens = [token.casefold() for token in re.findall(r"[0-9A-ZА-Я]+", _letters(text))]
     if all(part in tokens for part in parts):
         return True
-    folded = _soft(_fold(text))
+    folded = _soft(text)
     return all(_part_occurs(folded, part, parts) for part in parts)
 
 
@@ -755,9 +767,20 @@ def _part_occurs(folded: str, part: str, parts: list[str]) -> bool:
         start = index + 1
 
 
+def _letters(text: str) -> str:
+    """Верхний регистр, ё как е, двойники кириллицы. Пробелы остаются.
+
+    Двойники снимаются до NFKC: иначе лунная сигма становится обычной Σ.
+    """
+    shaped = text.translate(_HOMOGLYPHS)
+    shaped = unicodedata.normalize("NFKC", shaped).translate(_HOMOGLYPHS)
+    shaped = shaped.upper().replace("Ё", "Е")
+    return shaped.translate(_HOMOGLYPHS)
+
+
 def _fold(text: str) -> str:
-    return "".join(text.upper().split()).translate(_LATIN)
+    return "".join(_letters(text).split())
 
 
 def _soft(text: str) -> str:
-    return text.casefold().replace("ё", "е")
+    return _fold(text).casefold()
