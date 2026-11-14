@@ -28,6 +28,7 @@ from dockbot.models import (
     Booking,
     BookingStatus,
     BookingStatusEvent,
+    ClosedSlot,
     Gate,
     GateHour,
     SiteSettings,
@@ -212,16 +213,14 @@ def available_dates(
     with Session(engine) as session:
         warehouse = _load_warehouse(session)
         today = moment.astimezone(warehouse.zone).date()
-        occupied = _occupied_keys(
-            session,
-            _day_start(today, warehouse.zone),
-            _day_start(today + timedelta(days=HORIZON_DAYS), warehouse.zone),
-            ignore_booking_id,
-        )
+        span_start = _day_start(today, warehouse.zone)
+        span_end = _day_start(today + timedelta(days=HORIZON_DAYS), warehouse.zone)
+        occupied = _occupied_keys(session, span_start, span_end, ignore_booking_id)
+        closed = _closed_keys(session, span_start, span_end)
         found: list[date] = []
         for offset in range(HORIZON_DAYS):
             day = today + timedelta(days=offset)
-            if _open_slots(warehouse, day, moment, occupied):
+            if _open_slots(warehouse, day, moment, occupied, closed):
                 found.append(day)
         return found
 
@@ -236,15 +235,13 @@ def gates_with_slots(
     moment = _aware(now)
     with Session(engine) as session:
         warehouse = _load_warehouse(session)
-        occupied = _occupied_keys(
-            session,
-            _day_start(day, warehouse.zone),
-            _day_start(day + timedelta(days=1), warehouse.zone),
-            ignore_booking_id,
-        )
+        span_start = _day_start(day, warehouse.zone)
+        span_end = _day_start(day + timedelta(days=1), warehouse.zone)
+        occupied = _occupied_keys(session, span_start, span_end, ignore_booking_id)
+        closed = _closed_keys(session, span_start, span_end)
         seen: list[GateChoice] = []
         known: set[int] = set()
-        for slot in _open_slots(warehouse, day, moment, occupied):
+        for slot in _open_slots(warehouse, day, moment, occupied, closed):
             if slot.gate_id in known:
                 continue
             known.add(slot.gate_id)
@@ -263,15 +260,13 @@ def slots_for_gate(
     moment = _aware(now)
     with Session(engine) as session:
         warehouse = _load_warehouse(session)
-        occupied = _occupied_keys(
-            session,
-            _day_start(day, warehouse.zone),
-            _day_start(day + timedelta(days=1), warehouse.zone),
-            ignore_booking_id,
-        )
+        span_start = _day_start(day, warehouse.zone)
+        span_end = _day_start(day + timedelta(days=1), warehouse.zone)
+        occupied = _occupied_keys(session, span_start, span_end, ignore_booking_id)
+        closed = _closed_keys(session, span_start, span_end)
         return [
             slot
-            for slot in _open_slots(warehouse, day, moment, occupied)
+            for slot in _open_slots(warehouse, day, moment, occupied, closed)
             if slot.gate_id == gate_id
         ]
 
@@ -414,6 +409,8 @@ def reschedule_booking(
                 cell = _cell(warehouse, gate_id, slot_start)
                 if cell is None or not cell.start > moment:
                     raise SlotTaken("Этот слот больше не доступен. Выберите другой.")
+                if _is_closed(session, cell.gate_id, cell.start):
+                    raise SlotTaken("Слот закрыт. Выберите другой.")
                 if _same_slot(booking, cell):
                     trip = _trip(session, booking)
                 else:
@@ -493,6 +490,8 @@ def _insert_booking(
     cell = _cell(warehouse, gate_id, slot_start)
     if cell is None or not cell.start > now:
         raise SlotTaken("Этот слот больше не доступен. Выберите другой.")
+    if _is_closed(session, cell.gate_id, cell.start):
+        raise SlotTaken("Слот закрыт. Выберите другой.")
     if _is_occupied(session, cell.gate_id, cell.start, None):
         raise SlotTaken("Этот слот уже заняли. Выберите другой.")
     status = (
@@ -607,11 +606,15 @@ def _open_slots(
     day: date,
     now: datetime,
     occupied: set[tuple[int, int]],
+    closed: set[tuple[int, int]] | None = None,
 ) -> list[SlotChoice]:
+    hidden = closed or set()
     return [
         slot
         for slot in _cells(warehouse, day)
-        if slot.start > now and (slot.gate_id, int(slot.start.timestamp())) not in occupied
+        if slot.start > now
+        and (slot.gate_id, int(slot.start.timestamp())) not in occupied
+        and (slot.gate_id, int(slot.start.timestamp())) not in hidden
     ]
 
 
@@ -645,6 +648,30 @@ def _cell(warehouse: _Warehouse, gate_id: int, slot_start: datetime) -> SlotChoi
         if slot.gate_id == gate_id and int(slot.start.timestamp()) == target:
             return slot
     return None
+
+
+def _closed_keys(
+    session: Session, start: datetime, end: datetime
+) -> set[tuple[int, int]]:
+    rows = session.execute(
+        select(ClosedSlot.gate_id, ClosedSlot.starts_at).where(
+            ClosedSlot.starts_at >= start,
+            ClosedSlot.starts_at < end,
+        )
+    )
+    return {(gate_id, int(starts_at.timestamp())) for gate_id, starts_at in rows}
+
+
+def _is_closed(session: Session, gate_id: int, start: datetime) -> bool:
+    return (
+        session.scalar(
+            select(ClosedSlot.id).where(
+                ClosedSlot.gate_id == gate_id,
+                ClosedSlot.starts_at == start,
+            )
+        )
+        is not None
+    )
 
 
 def _is_occupied(

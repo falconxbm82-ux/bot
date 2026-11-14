@@ -39,20 +39,14 @@ def _trip(status: BookingStatus, hour: int) -> Trip:
 
 
 class ScreenTests(unittest.TestCase):
-    def test_three_roles_stay_on_every_keyboard(self) -> None:
-        for role in (None, StaffRole.security, StaffRole.warehouse):
-            markup = keyboard_for(role)
-            self.assertTrue(markup.resize_keyboard)
-            self.assertTrue(markup.is_persistent)
-            self.assertEqual(
-                button_labels(markup)[-3:],
-                ["Водитель", "Охрана", "Кладовщик"],
-            )
-        self.assertIn("Записаться", button_labels(keyboard_for(None)))
+    def test_keyboards_have_no_role_row(self) -> None:
+        driver = button_labels(keyboard_for(None))
+        self.assertEqual(driver[-2:], ["Я сотрудник", "Помощь"])
+        self.assertNotIn("Охрана", driver)
         self.assertIn("Смена сегодня", button_labels(keyboard_for(StaffRole.security)))
-        self.assertNotIn(
-            "Сканировать QR", button_labels(keyboard_for(StaffRole.warehouse))
-        )
+        warehouse = button_labels(keyboard_for(StaffRole.warehouse))
+        self.assertNotIn("Сканировать QR", warehouse)
+        self.assertIn("Ворота", button_labels(keyboard_for(StaffRole.admin)))
 
     def test_plate_accepts_latin_lookalikes_and_rejects_a_short_one(self) -> None:
         self.assertEqual(normalize_plate(" a100aa77 "), "А100АА77")
@@ -64,7 +58,7 @@ class ScreenTests(unittest.TestCase):
     def test_date_and_trip_buttons_are_short_russian(self) -> None:
         self.assertEqual(day_button(date(2026, 11, 9)), "Пн 09.11")
         label = trip_button(_trip(BookingStatus.confirmed, 9), ZONE)
-        self.assertEqual(label, "12.11 09:00 · В2 · А123АА77 · Подтверждено")
+        self.assertEqual(label, "12.11 09:00 · В2 · А123АА77 · 🟢 Подтверждено")
 
     def test_shift_filters_and_reminder_copy(self) -> None:
         trips = [

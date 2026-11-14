@@ -86,6 +86,7 @@ def apply_configuration(engine: Engine, settings: Settings) -> None:
 _ROLES = {
     "security": StaffRole.security,
     "warehouse": StaffRole.warehouse,
+    "admin": StaffRole.admin,
 }
 
 

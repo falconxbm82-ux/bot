@@ -55,19 +55,19 @@ log = logging.getLogger(__name__)
 
 router = Router(name="staff")
 
-CHECK = "staff:check"
-SHIFT = "staff:shift"
+CHECK = "sh:scan"
+SHIFT = "sh:day"
 LOGOUT = "staff:out"
-ARRIVED_PREFIX = "sf:a:"
-UNLOADING_PREFIX = "sf:u:"
-COMPLETED_PREFIX = "sf:c:"
-OPEN_PREFIX = "sf:o:"
+ARRIVED_PREFIX = "st:arrived:"
+UNLOADING_PREFIX = "st:gate:"
+COMPLETED_PREFIX = "st:done:"
+OPEN_PREFIX = "sh:open:"
 
 DENIED = "Доступ не предоставлен."
 PIN_BAD = "Неверный PIN."
 PIN_LOCKED = "Вход сотрудника заблокирован до /start."
 RIGHTS = "Недостаточно прав."
-PIN_PROMPT = "Введите PIN персонала."
+PIN_PROMPT = "Введите PIN сотрудника: 4 цифры."
 PASS_PROMPT = "Пришлите фото QR-пропуска."
 PASS_PIN_PROMPT = "Введите 6 цифр PIN пропуска."
 UNREADABLE = (
@@ -177,7 +177,7 @@ async def show_shift(query: CallbackQuery, state: FSMContext, engine: Engine) ->
     await _send_shift(query, engine, "day")
 
 
-@router.callback_query(F.data == "staff:pinpass")
+@router.callback_query(F.data == "sh:pin")
 async def ask_pass_pin(query: CallbackQuery, state: FSMContext, engine: Engine) -> None:
     person = await _guard(query, state, engine)
     if person is None:
@@ -189,14 +189,14 @@ async def ask_pass_pin(query: CallbackQuery, state: FSMContext, engine: Engine) 
     await _reply(query, PASS_PIN_PROMPT)
 
 
-@router.callback_query(F.data.startswith("sh:"))
+@router.callback_query(F.data.startswith("sh:"), ~F.data.startswith("sh:open:"))
 async def shift_filter(query: CallbackQuery, state: FSMContext, engine: Engine) -> None:
     person = await _guard(query, state, engine)
     if person is None:
         return
     raw = query.data or ""
-    if raw.startswith("sh:r:"):
-        mode = raw.removeprefix("sh:r:")
+    if raw.startswith("sh:refresh:"):
+        mode = raw.removeprefix("sh:refresh:")
     else:
         mode = {
             "sh:hour": "hour",
@@ -462,7 +462,7 @@ def _controls(mode: str) -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text="Весь день", callback_data="sh:day"),
             ],
             [
-                InlineKeyboardButton(text="Обновить", callback_data=f"sh:r:{mode}"),
+                InlineKeyboardButton(text="Обновить", callback_data=f"sh:refresh:{mode}"),
                 InlineKeyboardButton(text="В меню", callback_data=MENU),
             ],
         ]
@@ -474,7 +474,7 @@ def _scan_fallback() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="Ввести PIN пропуска", callback_data="staff:pinpass"
+                    text="Ввести PIN пропуска", callback_data="sh:pin"
                 )
             ],
             [InlineKeyboardButton(text="Отмена", callback_data=MENU)],
@@ -653,7 +653,7 @@ async def _reply(
 def _id(data: str | None, prefix: str) -> int | None:
     if not data or not data.startswith(prefix):
         return None
-    raw = data[len(prefix) :]
+    raw = data[len(prefix) :].split(":", 1)[0]
     if not raw.isdigit():
         return None
     return int(raw)

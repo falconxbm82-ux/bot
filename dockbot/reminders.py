@@ -23,6 +23,7 @@ from dockbot.models import (
     Gate,
     NotificationKind,
     NotificationLog,
+    SiteSettings,
     StatusSource,
 )
 from dockbot.present import local_parts
@@ -257,7 +258,13 @@ def _prepare(
             if booking is None or _attempted(session, booking, kind):
                 return None
             anchor = booking.rescheduled_at or booking.created_at
+            site = session.get(SiteSettings, 1)
+            late_after = LATE_AFTER
+            if site is not None and site.late_after_minutes:
+                late_after = timedelta(minutes=site.late_after_minutes)
             due = due_time(booking.slot_start, kind)
+            if kind is NotificationKind.late:
+                due = booking.slot_start + late_after
             if due <= anchor or due > now:
                 return None
             gate = session.get(Gate, booking.gate_id)
@@ -291,7 +298,7 @@ def _prepare(
             else:
                 if booking.status not in _OPEN:
                     return None
-                if now >= booking.slot_start + LATE_AFTER:
+                if now >= booking.slot_start + late_after:
                     return None
                 if (
                     kind == NotificationKind.h2

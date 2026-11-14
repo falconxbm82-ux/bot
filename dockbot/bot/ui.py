@@ -18,25 +18,27 @@ from dockbot.bot.keyboard import CALLBACK_BOOK, CALLBACK_LIST, NAV_MENU
 from dockbot.models import BookingStatus
 from dockbot.present import day_button, trip_button
 
-DATE_PREFIX = "wiz:d:"
-GATE_PREFIX = "wiz:g:"
-SLOT_PREFIX = "wiz:s:"
-CONFIRM = "wiz:ok"
-RESTART = "wiz:re"
-ABORT = "wiz:x"
+DATE_PREFIX = "bk:date:"
+GATE_PREFIX = "bk:gate:"
+SLOT_PREFIX = "bk:slot:"
+CONFIRM = "bk:ok"
+RESTART = "bk:re"
+ABORT = "bk:abort"
+MV_OK = "mv:ok"
 
-OPEN_PREFIX = "my:o:"
-PASS_PREFIX = "my:p:"
-CANCEL_PREFIX = "my:c:"
-CANCEL_YES_PREFIX = "my:y:"
-MOVE_PREFIX = "my:m:"
-PAGE_PREFIX = "my:n:"
+OPEN_PREFIX = "my:open:"
+PASS_PREFIX = "my:pass:"
+CANCEL_PREFIX = "cx:ask:"
+CANCEL_YES_PREFIX = "cx:yes:"
+CANCEL_NO_PREFIX = "cx:no:"
+MOVE_PREFIX = "mv:pick:"
+PAGE_PREFIX = "my:page:"
 PAGE_SIZE = 8
 MENU = NAV_MENU
-BACK = "wiz:back"
-EDIT = "wiz:edit"
-CURRENT_SLOT = "wiz:now"
-CARGO_PREFIX = "wiz:cargo:"
+BACK = "nav:back"
+EDIT = "bk:edit"
+CURRENT_SLOT = "bk:current"
+CARGO_PREFIX = "bk:cargo:"
 GEO = "my:geo"
 BOOK_INLINE = CALLBACK_BOOK
 
@@ -185,7 +187,7 @@ def cargo_markup() -> InlineKeyboardMarkup:
 def summary_markup(moving: bool) -> InlineKeyboardMarkup:
     if moving:
         rows = [
-            [InlineKeyboardButton(text="Подтвердить перенос", callback_data=CONFIRM)],
+            [InlineKeyboardButton(text="Подтвердить перенос", callback_data=MV_OK)],
             [InlineKeyboardButton(text="Отмена", callback_data=ABORT)],
         ]
     else:
@@ -302,7 +304,7 @@ def cancel_markup(booking_id: int) -> InlineKeyboardMarkup:
             [
                 InlineKeyboardButton(
                     text="Нет, оставить",
-                    callback_data=f"{OPEN_PREFIX}{booking_id}",
+                    callback_data=f"{CANCEL_NO_PREFIX}{booking_id}",
                 )
             ],
         ]

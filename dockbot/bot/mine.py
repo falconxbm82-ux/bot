@@ -24,6 +24,7 @@ from dockbot.booking import (
 )
 from dockbot.bot.driver import MY_BOOKINGS, driver_menu
 from dockbot.bot.ui import (
+    CANCEL_NO_PREFIX,
     CANCEL_PREFIX,
     CANCEL_YES_PREFIX,
     MOVE_PREFIX,
@@ -249,6 +250,15 @@ async def ask_cancel(query: CallbackQuery, engine: Engine) -> None:
         f"Отменить бронь на {date_text} {clock}, ворота №{trip.gate_code}?",
         cancel_markup(trip.id),
     )
+
+
+@router.callback_query(F.data.startswith(CANCEL_NO_PREFIX))
+async def keep_booking(query: CallbackQuery, engine: Engine) -> None:
+    booking_id = _id(query.data or "", CANCEL_NO_PREFIX)
+    if booking_id is None:
+        await query.answer("Кнопка устарела", show_alert=True)
+        return
+    await _show_card(query, engine, booking_id)
 
 
 @router.callback_query(F.data.startswith(CANCEL_YES_PREFIX))

@@ -37,6 +37,7 @@ from dockbot.db import make_engine, upgrade_head  # noqa: E402
 from dockbot.models import (  # noqa: E402
     Booking,
     BookingStatus,
+    ClosedSlot,
     BookingStatusEvent,
     Gate,
     GateHour,
@@ -488,6 +489,7 @@ class ReminderTests(unittest.TestCase):
                 session.execute(delete(BookingStatusEvent))
                 session.execute(delete(NotificationLog))
                 session.execute(delete(Booking))
+                session.execute(delete(ClosedSlot))
                 session.execute(delete(GateHour))
                 session.execute(delete(Gate))
                 session.execute(delete(SiteSettings))

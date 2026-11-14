@@ -17,9 +17,11 @@ from dockbot.access import active_staff, logout_staff
 from dockbot.bot.keyboard import (
     BOOK,
     CANCEL_TRIP,
+    DAY_SUMMARY,
     DIRECTIONS,
     ENTER_PIN,
     FINISHED,
+    GATES,
     HELP,
     MONITOR,
     MOVE_TRIP,
@@ -30,7 +32,11 @@ from dockbot.bot.keyboard import (
     ROLE_GUARD,
     ROLE_WAREHOUSE,
     SCAN,
+    SETTINGS,
     SHIFT_TODAY,
+    SLOTS,
+    STAFF_ENTRY,
+    STAFF_LIST,
     WAITING,
     help_text,
     keyboard_for,
@@ -41,6 +47,13 @@ from dockbot.bot.mine import (
     show_move_choices,
     show_my_bookings,
     show_my_pass,
+)
+from dockbot.bot.admin import (
+    open_day,
+    open_gates,
+    open_settings,
+    open_slots,
+    open_staff,
 )
 from dockbot.bot.staff import (
     PIN_PROMPT,
@@ -114,6 +127,54 @@ async def choose_cancel(message: Message, engine: Engine) -> None:
 @router.message(F.text == MOVE_TRIP)
 async def choose_move(message: Message, engine: Engine) -> None:
     await show_move_choices(message, engine)
+
+
+@router.message(F.text == STAFF_ENTRY)
+async def choose_staff_entry(
+    message: Message, state: FSMContext, engine: Engine
+) -> None:
+    user = message.from_user
+    if user is None:
+        return
+    person = await asyncio.to_thread(active_staff, engine, user.id)
+    if person is not None:
+        await state.clear()
+        await message.answer(
+            "Вы уже вошли. Чтобы сменить роль, отправьте /logout.",
+            reply_markup=keyboard_for(person.role),
+        )
+        return
+    await state.clear()
+    await state.set_state(StaffFlow.pin)
+    await state.update_data(pin_fails=0)
+    await message.answer(PIN_PROMPT)
+
+
+@router.message(F.text == GATES)
+async def choose_gates(message: Message, state: FSMContext, engine: Engine) -> None:
+    await open_gates(message, state, engine)
+
+
+@router.message(F.text == SLOTS)
+async def choose_slots(message: Message, state: FSMContext, engine: Engine) -> None:
+    await open_slots(message, state, engine)
+
+
+@router.message(F.text == STAFF_LIST)
+async def choose_staff_list(
+    message: Message, state: FSMContext, engine: Engine
+) -> None:
+    await open_staff(message, state, engine)
+
+
+@router.message(F.text == SETTINGS)
+async def choose_settings(message: Message, state: FSMContext, engine: Engine) -> None:
+    await open_settings(message, state, engine)
+
+
+@router.message(F.text == DAY_SUMMARY)
+async def choose_day(message: Message, state: FSMContext, engine: Engine) -> None:
+    await open_day(message, state, engine)
 
 
 @router.message(F.text == HELP)

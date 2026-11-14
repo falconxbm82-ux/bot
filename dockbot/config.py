@@ -18,7 +18,7 @@ PACKAGE_ROOT = Path(__file__).resolve().parent
 PROJECT_ROOT = PACKAGE_ROOT.parent
 
 # Длина PIN персонала на стенде. В ТЗ не задана.
-STAFF_PIN_LENGTH = 6
+STAFF_PIN_LENGTH = 4
 
 
 class ConfigError(Exception):
@@ -179,14 +179,14 @@ def parse_staff_list(raw: str | None) -> tuple[StaffSpec, ...]:
         name = parts[1].strip()
         pin = parts[2].strip()
         telegram_raw = parts[3].strip() if len(parts) == 4 else ""
-        if role not in ("security", "warehouse"):
-            raise ConfigError("Роль персонала: security или warehouse")
+        if role not in ("security", "warehouse", "admin"):
+            raise ConfigError("Роль персонала: security, warehouse или admin")
         if not name or len(name) > 200:
             raise ConfigError("Укажите имя сотрудника в STAFF")
         if (role, name) in seen_names:
             raise ConfigError("В STAFF повторяется одна и та же роль и имя")
         if pin and not (pin.isdigit() and len(pin) == STAFF_PIN_LENGTH):
-            raise ConfigError("PIN персонала на стенде — 6 цифр")
+            raise ConfigError("PIN персонала на стенде — 4 цифры")
         telegram_id: int | None = None
         if telegram_raw:
             if not telegram_raw.isdigit() or int(telegram_raw) <= 0:

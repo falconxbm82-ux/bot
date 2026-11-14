@@ -31,10 +31,12 @@ from dockbot.booking import (
     slots_for_gate,
 )
 from dockbot.bot.driver import BOOK, driver_menu
+from dockbot.bot.keyboard import hide_keyboard
 from dockbot.bot.ui import (
     ABORT,
     CONFIRM,
     DATE_PREFIX,
+    MV_OK,
     GATE_PREFIX,
     RESTART,
     SLOT_PREFIX,
@@ -282,7 +284,9 @@ async def restart(query: CallbackQuery, state: FSMContext, engine: Engine) -> No
     await show_dates(query, state, engine)
 
 
-@router.callback_query(StateFilter(BookFlow.summary, MoveFlow.summary), F.data == CONFIRM)
+@router.callback_query(
+    StateFilter(BookFlow.summary, MoveFlow.summary), F.data.in_({CONFIRM, MV_OK})
+)
 async def confirm(query: CallbackQuery, state: FSMContext, engine: Engine) -> None:
     ids = actor_ids(query)
     if ids is None or ids in _busy:
@@ -352,6 +356,16 @@ async def confirm(query: CallbackQuery, state: FSMContext, engine: Engine) -> No
         _busy.discard(ids)
 
 
+async def _hide_reply(event: Message | CallbackQuery) -> None:
+    text = "Шаги записи — кнопками в сообщении."
+    if isinstance(event, Message):
+        await event.answer(text, reply_markup=hide_keyboard())
+        return
+    message = event.message
+    if message is not None and hasattr(message, "answer"):
+        await message.answer(text, reply_markup=hide_keyboard())
+
+
 async def show_dates(
     event: Message | CallbackQuery,
     state: FSMContext,
@@ -360,6 +374,9 @@ async def show_dates(
 ) -> None:
     data = await state.get_data()
     moving = data.get("mode") == "move"
+    if not data.get("keyboard_hidden"):
+        await _hide_reply(event)
+        await state.update_data(keyboard_hidden=True)
     ignore = int(data["booking_id"]) if moving and data.get("booking_id") else None
     try:
         dates = await asyncio.to_thread(
@@ -604,6 +621,7 @@ async def _send_pass(
             "Пропуск выше. PIN — в подписи к фото.",
             reply_markup=pass_done_markup(booking_id),
         )
+        await message.answer("Меню водителя.", reply_markup=driver_menu())
     except Exception:
         log.warning("pass image was not delivered for booking %s", booking_id)
         await message.answer(

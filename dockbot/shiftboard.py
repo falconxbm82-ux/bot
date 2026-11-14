@@ -36,7 +36,7 @@ def checkpoint_actions(trip: Trip) -> tuple[ShiftAction, ...]:
     if allowed_next(trip.status) != BookingStatus.arrived:
         return ()
     return (
-        ShiftAction(BookingStatus.arrived, "Отметить прибытие", f"sf:a:{trip.id}"),
+        ShiftAction(BookingStatus.arrived, "Отметить прибытие", f"st:arrived:{trip.id}"),
     )
 
 
@@ -44,9 +44,9 @@ def row_actions(trip: Trip) -> tuple[ShiftAction, ...]:
     target = allowed_next(trip.status)
     if target == BookingStatus.unloading:
         label = f"На воротах {trip.gate_code}"
-        return (ShiftAction(target, label, f"sf:u:{trip.id}"),)
+        return (ShiftAction(target, label, f"st:gate:{trip.id}:{trip.gate_id}"),)
     if target == BookingStatus.completed:
-        return (ShiftAction(target, "Разгружен", f"sf:c:{trip.id}"),)
+        return (ShiftAction(target, "Разгружен", f"st:done:{trip.id}"),)
     return ()
 
 

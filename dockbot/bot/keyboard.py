@@ -1,11 +1,8 @@
-"""Нижняя клавиатура. Три роли видны всегда, рядом действия этой роли.
-
-Кнопки шага (дата, ворота, слот, карточка) остаются в сообщении.
-"""
+"""Нижняя клавиатура роли. На время мастера её снимают и возвращают в меню."""
 
 from __future__ import annotations
 
-from aiogram.types import KeyboardButton, ReplyKeyboardMarkup
+from aiogram.types import KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove
 
 from dockbot.models import StaffRole
 
@@ -20,6 +17,7 @@ DIRECTIONS = "Как проехать"
 CANCEL_TRIP = "Отменить"
 MOVE_TRIP = "Перенести"
 HELP = "Помощь"
+STAFF_ENTRY = "Я сотрудник"
 
 SCAN = "Сканировать QR"
 ENTER_PIN = "Ввести PIN"
@@ -30,17 +28,34 @@ WAITING = "Ожидаются"
 ON_SITE = "На территории"
 FINISHED = "Завершены"
 
-_ROLES = (ROLE_DRIVER, ROLE_GUARD, ROLE_WAREHOUSE)
-CALLBACK_BOOK = "driver:book"
-CALLBACK_LIST = "driver:my_bookings"
+GATES = "Ворота"
+SLOTS = "Слоты"
+STAFF_LIST = "Сотрудники"
+SETTINGS = "Параметры"
+DAY_SUMMARY = "Сводка дня"
+SEND_POINT = "Отправить геопозицию"
+
+CALLBACK_BOOK = "bk:book"
+CALLBACK_LIST = "my:list"
 NAV_MENU = "nav:menu"
+
+
+def hide_keyboard() -> ReplyKeyboardRemove:
+    return ReplyKeyboardRemove()
 
 
 def _rows(*lines: tuple[str, ...]) -> ReplyKeyboardMarkup:
     keyboard = [[KeyboardButton(text=label) for label in line] for line in lines]
-    keyboard.append([KeyboardButton(text=role) for role in _ROLES])
     return ReplyKeyboardMarkup(
         keyboard=keyboard,
+        resize_keyboard=True,
+        is_persistent=True,
+    )
+
+
+def location_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text=SEND_POINT, request_location=True)]],
         resize_keyboard=True,
         is_persistent=True,
     )
@@ -51,11 +66,13 @@ def keyboard_for(role: StaffRole | None) -> ReplyKeyboardMarkup:
         return _rows((SCAN, ENTER_PIN), (SHIFT_TODAY, HELP))
     if role is StaffRole.warehouse:
         return _rows((MONITOR, WAITING), (ON_SITE, FINISHED), (HELP,))
+    if role is StaffRole.admin:
+        return _rows((GATES, SLOTS), (STAFF_LIST, SETTINGS), (DAY_SUMMARY, HELP))
     return _rows(
         (BOOK, MY_BOOKINGS),
         (MY_PASS, DIRECTIONS),
         (CANCEL_TRIP, MOVE_TRIP),
-        (HELP,),
+        (STAFF_ENTRY, HELP),
     )
 
 
@@ -71,7 +88,7 @@ def help_text(role: StaffRole | None) -> str:
             "«Ввести PIN» — шесть цифр пропуска.\n"
             "«Смена сегодня» — машины этих суток.\n"
             "На карточке: «Отметить прибытие», «На воротах N», «Разгружен».\n"
-            "«Водитель» снимает эту роль."
+            "Вернуться водителем: /logout."
         )
     if role is StaffRole.warehouse:
         return (
@@ -80,14 +97,23 @@ def help_text(role: StaffRole | None) -> str:
             "«Ожидаются», «На территории», «Завершены» — тот же список с фильтром.\n"
             "На карточке те же отметки, что у охраны.\n"
             "QR кладовщик не сканирует: машина берётся из списка.\n"
-            "«Водитель» снимает эту роль."
+            "Вернуться водителем: /logout."
+        )
+    if role is StaffRole.admin:
+        return (
+            "Администратор\n"
+            "«Ворота» — включить, выключить, добавить.\n"
+            "«Слоты» — окно 08:00–20:00, закрыть свободный слот.\n"
+            "«Сотрудники» — PIN на 4 цифры, отзыв доступа.\n"
+            "«Параметры» — окно отмены, опоздание, адрес, точка.\n"
+            "«Сводка дня» — сколько броней в каждом статусе."
         )
     return (
         "Водитель\n"
         "«Записаться» — новое окно разгрузки.\n"
         "«Мои брони» — список и карточка.\n"
         "«Мой пропуск» — QR и PIN.\n"
-        "«Как проехать» — точка склада, если она задана.\n"
+        "«Как проехать» — адрес и точка склада.\n"
         "«Отменить» и «Перенести» — пока до слота больше окна отмены.\n"
-        "«Охрана» и «Кладовщик» просят PIN персонала."
+        "«Я сотрудник» — PIN из 4 цифр."
     )

@@ -9,13 +9,13 @@ from dockbot.booking import Trip
 from dockbot.models import BookingStatus
 
 STATUS_LABELS: dict[BookingStatus, str] = {
-    BookingStatus.booked: "Забронировано",
-    BookingStatus.confirmed: "Подтверждено",
-    BookingStatus.arrived: "Прибыл",
-    BookingStatus.unloading: "На разгрузке",
-    BookingStatus.completed: "Завершено",
-    BookingStatus.late: "Опоздал",
-    BookingStatus.cancelled: "Отменено",
+    BookingStatus.booked: "🟡 Забронировано",
+    BookingStatus.confirmed: "🟢 Подтверждено",
+    BookingStatus.arrived: "🔵 Прибыл",
+    BookingStatus.unloading: "🟠 На разгрузке",
+    BookingStatus.completed: "✅ Завершено",
+    BookingStatus.late: "🔴 Опоздал",
+    BookingStatus.cancelled: "⚫ Отменено",
 }
 
 _WEEKDAYS = ("Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс")

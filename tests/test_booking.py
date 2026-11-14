@@ -53,6 +53,7 @@ from dockbot.models import (  # noqa: E402
     OCCUPYING_STATUSES,
     Booking,
     BookingStatus,
+    ClosedSlot,
     BookingStatusEvent,
     Gate,
     GateHour,
@@ -490,6 +491,7 @@ class BookingTests(unittest.TestCase):
                 session.execute(delete(BookingStatusEvent))
                 session.execute(delete(NotificationLog))
                 session.execute(delete(Booking))
+                session.execute(delete(ClosedSlot))
                 session.execute(delete(GateHour))
                 session.execute(delete(Gate))
                 session.execute(delete(SiteSettings))
