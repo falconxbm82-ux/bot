@@ -19,8 +19,15 @@ from aiogram.types import (
 )
 from sqlalchemy.engine import Engine
 
-from dockbot.access import AccessDenied, active_staff, enter_pin, logout_staff
+from dockbot.access import (
+    AccessDenied,
+    active_staff,
+    enter_pin,
+    enter_role,
+    logout_staff,
+)
 from dockbot.bot.driver import driver_menu
+from dockbot.bot.keyboard import keyboard_for
 from dockbot.booking import SiteNotConfigured, Trip
 from dockbot.checkpoint import (
     PassNotFound,
@@ -70,22 +77,8 @@ class StaffFlow(StatesGroup):
     checkpoint = State()
 
 
-def menu_rows(role: StaffRole) -> list[list[InlineKeyboardButton]]:
-    """Охрана проверяет пропуск. Склад открывает смену. Чужую кнопку роль не видит."""
-    if role is StaffRole.security:
-        rows = [
-            [InlineKeyboardButton(text="Проверить пропуск", callback_data=CHECK)]
-        ]
-    elif role is StaffRole.warehouse:
-        rows = [[InlineKeyboardButton(text="Экран смены", callback_data=SHIFT)]]
-    else:
-        return []
-    rows.append([InlineKeyboardButton(text="Выйти из роли", callback_data=LOGOUT)])
-    return rows
-
-
-def staff_menu(role: StaffRole) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=menu_rows(role))
+def staff_menu(role: StaffRole):
+    return keyboard_for(role)
 
 
 @router.message(Command("logout"))
@@ -134,8 +127,15 @@ async def staff_pin(message: Message, state: FSMContext, engine: Engine) -> None
     text = (message.text or "").strip()
     if user is None or text.startswith("/"):
         return
+    data = await state.get_data()
+    wanted = data.get("wanted_role")
     try:
-        person = await asyncio.to_thread(enter_pin, engine, user.id, text)
+        if wanted in (StaffRole.security.value, StaffRole.warehouse.value):
+            person = await asyncio.to_thread(
+                enter_role, engine, user.id, text, StaffRole(wanted)
+            )
+        else:
+            person = await asyncio.to_thread(enter_pin, engine, user.id, text)
     except AccessDenied:
         await message.answer(DENIED)
         return
@@ -412,6 +412,39 @@ async def _deliver(
                 )
         return
     for page in pages:
+        await message.answer(page.text, reply_markup=_page_markup(page, zone))
+
+
+async def open_checkpoint(
+    message: Message, state: FSMContext, engine: Engine
+) -> None:
+    user = message.from_user
+    if user is None:
+        await message.answer(DENIED)
+        return
+    person = await asyncio.to_thread(active_staff, engine, user.id)
+    if person is None or person.role is not StaffRole.security:
+        await message.answer(DENIED)
+        return
+    await state.set_state(StaffFlow.checkpoint)
+    await message.answer(PASS_PROMPT)
+
+
+async def open_shift(message: Message, state: FSMContext, engine: Engine) -> None:
+    user = message.from_user
+    if user is None:
+        await message.answer(DENIED)
+        return
+    try:
+        zone, day, trips = await asyncio.to_thread(load_shift, engine, user.id)
+    except AccessDenied:
+        await message.answer(DENIED)
+        return
+    except SiteNotConfigured:
+        await message.answer("Склад не настроен.")
+        return
+    await state.set_state(None)
+    for page in shift_pages(trips, zone, day):
         await message.answer(page.text, reply_markup=_page_markup(page, zone))
 
 

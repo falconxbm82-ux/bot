@@ -1,8 +1,4 @@
-"""Стартовый экран водителя: забронировать и мои брони.
-
-Кнопка охраны или склада добавляется только если Telegram ID
-уже привязан к действующему сотруднику этой роли.
-"""
+"""Стартовый экран. Нижняя клавиатура зависит от уже привязанной роли."""
 
 from __future__ import annotations
 
@@ -11,8 +7,10 @@ import asyncio
 from aiogram import Router
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import Message, ReplyKeyboardMarkup
 from sqlalchemy.engine import Engine
+
+from dockbot.bot.keyboard import keyboard_for
 
 router = Router(name="driver")
 
@@ -21,16 +19,8 @@ MY_BOOKINGS = "driver:my_bookings"
 START_TEXT = "Управление очередью разгрузки.\nВыберите действие."
 
 
-def driver_menu(
-    extra: list[list[InlineKeyboardButton]] | None = None,
-) -> InlineKeyboardMarkup:
-    rows: list[list[InlineKeyboardButton]] = [
-        [InlineKeyboardButton(text="Забронировать", callback_data=BOOK)],
-        [InlineKeyboardButton(text="Мои брони", callback_data=MY_BOOKINGS)],
-    ]
-    if extra:
-        rows.extend(extra)
-    return InlineKeyboardMarkup(inline_keyboard=rows)
+def driver_menu() -> ReplyKeyboardMarkup:
+    return keyboard_for(None)
 
 
 @router.message(CommandStart())
@@ -52,14 +42,13 @@ async def cancel_dialog(message: Message, state: FSMContext, engine: Engine) -> 
     await message.answer(text, reply_markup=await _menu(message, engine))
 
 
-async def _menu(message: Message, engine: Engine) -> InlineKeyboardMarkup:
+async def _menu(message: Message, engine: Engine) -> ReplyKeyboardMarkup:
     user = message.from_user
     if user is None:
-        return driver_menu()
+        return keyboard_for(None)
     from dockbot.access import active_staff
-    from dockbot.bot.staff import menu_rows
 
     person = await asyncio.to_thread(active_staff, engine, user.id)
     if person is None:
-        return driver_menu()
-    return driver_menu(menu_rows(person.role))
+        return keyboard_for(None)
+    return keyboard_for(person.role)

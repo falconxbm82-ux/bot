@@ -7,7 +7,7 @@ import logging
 
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
-from aiogram.types import BufferedInputFile, CallbackQuery
+from aiogram.types import BufferedInputFile, CallbackQuery, Message
 from sqlalchemy.engine import Engine
 
 from dockbot.booking import (
@@ -46,6 +46,22 @@ router = Router(name="mine")
 @router.callback_query(F.data == MY_BOOKINGS)
 async def my_bookings(query: CallbackQuery, engine: Engine) -> None:
     await _show_list(query, engine, 0)
+
+
+async def show_my_bookings(message: Message, engine: Engine) -> None:
+    user = message.from_user
+    if user is None:
+        return
+    try:
+        trips = await asyncio.to_thread(list_future, engine, user.id, message.chat.id)
+        zone = await asyncio.to_thread(load_zone, engine)
+    except SiteNotConfigured as exc:
+        await message.answer(str(exc))
+        return
+    if not trips:
+        await message.answer("Будущих броней нет.")
+        return
+    await message.answer("Будущие брони.", reply_markup=trips_markup(trips, zone, 0))
 
 
 @router.callback_query(F.data.startswith(PAGE_PREFIX))

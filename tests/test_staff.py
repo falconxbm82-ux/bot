@@ -37,6 +37,7 @@ from dockbot.access import (  # noqa: E402
     AccessDenied,
     active_staff,
     enter_pin,
+    enter_role,
     hash_pin,
     logout_staff,
     unusable_pin_hash,
@@ -48,8 +49,7 @@ from dockbot.booking import (  # noqa: E402
     create_booking,
     slots_for_gate,
 )
-from dockbot.bot.driver import driver_menu  # noqa: E402
-from dockbot.bot.staff import menu_rows  # noqa: E402
+from dockbot.bot.keyboard import button_labels, keyboard_for  # noqa: E402
 from dockbot.checkpoint import (  # noqa: E402
     PassNotFound,
     TransitionRejected,
@@ -164,20 +164,27 @@ class StaffTests(unittest.TestCase):
         )
         self.assertEqual(done.status, BookingStatus.completed)
 
-    def test_driver_menu_hides_staff_actions(self) -> None:
-        plain = _labels(driver_menu())
-        self.assertNotIn("Проверить пропуск", plain)
-        self.assertNotIn("Экран смены", plain)
-        guard = _labels(driver_menu(menu_rows(StaffRole.security)))
-        self.assertIn("Забронировать", guard)
-        self.assertIn("Проверить пропуск", guard)
-        self.assertIn("Выйти из роли", guard)
-        self.assertNotIn("Экран смены", guard)
-        warehouse = _labels(driver_menu(menu_rows(StaffRole.warehouse)))
-        self.assertIn("Экран смены", warehouse)
-        self.assertIn("Выйти из роли", warehouse)
-        self.assertNotIn("Проверить пропуск", warehouse)
-        self.assertNotIn("Выйти из роли", plain)
+    def test_persistent_keyboard_keeps_three_roles(self) -> None:
+        driver = keyboard_for(None)
+        guard = keyboard_for(StaffRole.security)
+        warehouse = keyboard_for(StaffRole.warehouse)
+        for markup in (driver, guard, warehouse):
+            self.assertTrue(markup.resize_keyboard)
+            self.assertTrue(markup.is_persistent)
+            self.assertEqual(
+                button_labels(markup)[-3:],
+                ["Водитель", "Охрана", "Кладовщик"],
+            )
+        self.assertEqual(
+            button_labels(driver),
+            ["Забронировать", "Мои брони", "Водитель", "Охрана", "Кладовщик"],
+        )
+        self.assertEqual(button_labels(guard)[0], "Проверить пропуск")
+        self.assertNotIn("Экран смены", button_labels(guard))
+        self.assertNotIn("Забронировать", button_labels(guard))
+        self.assertEqual(button_labels(warehouse)[0], "Экран смены")
+        self.assertNotIn("Проверить пропуск", button_labels(warehouse))
+        self.assertNotIn("Мои брони", button_labels(warehouse))
 
     def test_logout_clears_this_chat_and_keeps_the_pin(self) -> None:
         guard_id = self._staff(pin="111111", name="Охрана")
@@ -233,6 +240,40 @@ class StaffTests(unittest.TestCase):
         again = enter_pin(ENGINE, WAREHOUSE_TG, "222222")
         self.assertEqual(again.role, StaffRole.warehouse)
         self.assertEqual(again.telegram_id, WAREHOUSE_TG)
+
+    def test_correct_pin_switches_this_chat_and_wrong_pin_does_not(self) -> None:
+        self._staff(pin="111111", name="Охрана")
+        warehouse_id = self._staff(
+            pin="222222",
+            telegram_id=WAREHOUSE_TG,
+            name="Склад",
+            role=StaffRole.warehouse,
+        )
+        other_id = self._staff(
+            pin="135790",
+            telegram_id=OTHER_TG,
+            name="Вторая охрана",
+        )
+        with self.assertRaises(AccessDenied):
+            enter_role(ENGINE, WAREHOUSE_TG, "000000", StaffRole.security)
+        with self.assertRaises(AccessDenied):
+            enter_role(ENGINE, WAREHOUSE_TG, "222222", StaffRole.security)
+        self.assertEqual(active_staff(ENGINE, WAREHOUSE_TG).role, StaffRole.warehouse)
+        self.assertEqual(active_staff(ENGINE, OTHER_TG).telegram_id, OTHER_TG)
+        person = enter_role(ENGINE, WAREHOUSE_TG, "111111", StaffRole.security)
+        self.assertEqual(person.role, StaffRole.security)
+        self.assertEqual(person.telegram_id, WAREHOUSE_TG)
+        with Session(ENGINE) as session:
+            warehouse = session.get(StaffUser, warehouse_id)
+            other = session.get(StaffUser, other_id)
+            assert warehouse is not None and other is not None
+            self.assertIsNone(warehouse.telegram_id)
+            self.assertTrue(verify_pin("222222", warehouse.pin_hash))
+            self.assertEqual(other.telegram_id, OTHER_TG)
+        with self.assertRaises(AccessDenied):
+            enter_role(ENGINE, STAFF_TG, "135790", StaffRole.security)
+        self.assertIsNone(active_staff(ENGINE, STAFF_TG))
+        self.assertEqual(active_staff(ENGINE, OTHER_TG).telegram_id, OTHER_TG)
 
     def test_staff_pin_binds_empty_id_and_does_not_overwrite(self) -> None:
         staff_id = self._staff(pin="246810")
@@ -806,10 +847,6 @@ class StaffTests(unittest.TestCase):
                 session.execute(delete(Gate))
                 session.execute(delete(SiteSettings))
                 session.execute(delete(StaffUser))
-
-
-def _labels(markup) -> list[str]:
-    return [button.text for row in markup.inline_keyboard for button in row]
 
 
 def _at(day, hour: int, gate: str = "1") -> datetime:
