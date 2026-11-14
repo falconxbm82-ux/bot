@@ -1,21 +1,28 @@
 """Сверка фото документа с госномером и ФИО.
 
-Текст читает локальный Tesseract, если он есть в системе.
+Текст читает локальный Tesseract. Если в системе нет сборки с русским
+и английским, при старте она скачивается в .venv/tesseract.
 Платного API и новых секретов нет. Неуверенный кадр не подменяет сверку:
 фото остаётся, результат подтверждает водитель.
-Если программы или русского языка нет, причина пишется в журнал.
+Если программу так и не удалось подготовить, причина пишется в журнал.
 """
 
 from __future__ import annotations
 
+import hashlib
+import io
 import logging
 import os
+import platform
 import re
 import shutil
+import tarfile
+import threading
+import urllib.error
+import urllib.request
 import uuid
 from dataclasses import dataclass
-from io import BytesIO
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import cv2
 import numpy as np
@@ -71,7 +78,65 @@ _PLATE_CLASS = {
     "3": "3З",
     "8": "8ВB",
 }
+# Portable Tesseract 5.5.3 and tessdata_fast 4.1.0 (the fast rus/eng models
+# Debian ships). Digests are the GitHub release asset checksums.
+_ENGINE_RELEASE = (
+    "https://github.com/mikhailgarber/tesseract-portable/releases/download/v5.5.3_5"
+)
+_LANG_RELEASE = (
+    "https://github.com/mikhailgarber/tesseract-portable/releases/download/"
+    "tessdata_fast-4.1.0"
+)
+_DOWNLOAD_LIMIT = 20_000_000
+
+
+@dataclass(frozen=True)
+class _Asset:
+    url: str
+    sha256: str
+
+
+@dataclass(frozen=True)
+class _EngineSpec:
+    asset: _Asset
+    binary_name: str
+
+
+@dataclass(frozen=True)
+class LocalEngine:
+    binary: Path
+    tessdata: Path
+
+
+_LANG_FILES = {
+    "eng.traineddata": _Asset(
+        f"{_LANG_RELEASE}/eng.traineddata",
+        "7d4322bd2a7749724879683fc3912cb542f19906c83bcc1a52132556427170b2",
+    ),
+    "rus.traineddata": _Asset(
+        f"{_LANG_RELEASE}/rus.traineddata",
+        "e16e5e036cce1d9ec2b00063cf8b54472625b9e14d893a169e2b0dedeb4df225",
+    ),
+}
+_ENGINE_SPECS = {
+    "windows": _EngineSpec(
+        _Asset(
+            f"{_ENGINE_RELEASE}/tesseract-5.5.3_5-x64-windows-static.tar.gz",
+            "be50ebf6b9cb5c58b440e3531fd4b5ca4ff476cf9505305b776ed6691fc9e3c1",
+        ),
+        "tesseract.exe",
+    ),
+    "linux": _EngineSpec(
+        _Asset(
+            f"{_ENGINE_RELEASE}/tesseract-5.5.3_5-x64-linux-portable.tar.gz",
+            "52c198f697eb8c9e49f20597f319bf384f15b5f8361dc1aa1b8b3254e04b610c",
+        ),
+        "tesseract",
+    ),
+}
+ENGINE_ROOT = PROJECT_ROOT / ".venv" / "tesseract"
 _probe_cache: tuple[object | None, str | None, set[str]] | None = None
+_probe_lock = threading.Lock()
 
 
 def prepare_image(image: bytes) -> bytes:
@@ -91,9 +156,9 @@ def ocr_gap(binary_found: bool, languages: set[str] | None) -> str | None:
     """Чего не хватает для локального чтения. None — Tesseract и rus на месте."""
     if not binary_found:
         return (
-            "Tesseract executable was not found. Install Tesseract OCR, "
-            "add it to PATH or use C:\\Program Files\\Tesseract-OCR, "
-            "and install rus.traineddata."
+            "Tesseract executable was not found. "
+            "Expected a local engine in .venv/tesseract "
+            "with rus.traineddata and eng.traineddata."
         )
     if not languages or "rus" not in languages:
         found = ", ".join(sorted(languages or ())) or "none"
@@ -144,7 +209,7 @@ def read_document(image: bytes, plate: str, driver_name: str) -> Reading:
 def save_document(image: bytes) -> str:
     """Файл лежит в data/documents и в git не входит."""
     prepare_image(image)
-    picture = Image.open(BytesIO(image)).convert("RGB")
+    picture = Image.open(io.BytesIO(image)).convert("RGB")
     _DOCUMENTS.mkdir(parents=True, exist_ok=True)
     name = f"{uuid.uuid4().hex}.jpg"
     picture.save(_DOCUMENTS / name, format="JPEG", quality=85)
@@ -163,29 +228,102 @@ def discard_document(name: str | None) -> None:
         path.unlink()
 
 
+def prepare_ocr() -> None:
+    """Найти rus+eng до опроса Telegram. Сбой чтения не останавливает бота."""
+    log.disabled = False
+    try:
+        engine, gap, languages = _probe()
+    except Exception as exc:
+        log.error("document OCR is unavailable: %s", exc.__class__.__name__)
+        return
+    if engine is None:
+        log.error("document OCR is unavailable: %s", gap)
+        return
+    ready = ", ".join(name for name in ("rus", "eng") if name in languages)
+    log.info("document OCR ready (%s)", ready)
+
+
+def ensure_local_engine(root: Path | None = None) -> LocalEngine:
+    """Скачать переносной Tesseract и rus+eng в .venv, если их ещё нет."""
+    directory = root or ENGINE_ROOT
+    ready = _ready_local(directory)
+    if ready is not None:
+        return ready
+    spec = _engine_spec()
+    if spec is None:
+        raise RuntimeError("no portable Tesseract build for this system")
+    log.info("document OCR: fetching engine into %s", directory)
+    _extract_engine(_download(spec.asset), directory, spec.binary_name)
+    tessdata = directory / "tessdata"
+    for name, asset in _LANG_FILES.items():
+        _write_bytes(tessdata / name, _download(asset))
+    ready = _ready_local(directory)
+    if ready is None:
+        raise RuntimeError("local Tesseract is missing rus.traineddata after fetch")
+    return ready
+
+
 def _probe() -> tuple[object | None, str | None, set[str]]:
     global _probe_cache
-    if _probe_cache is not None:
+    # Alembic fileConfig disables loggers created before the migration.
+    log.disabled = False
+    with _probe_lock:
+        if _probe_cache is None:
+            _probe_cache = _locate()
         return _probe_cache
+
+
+def _locate() -> tuple[object | None, str | None, set[str]]:
     try:
         import pytesseract
     except ImportError:
-        _probe_cache = (None, ocr_gap(False, None), set())
-        return _probe_cache
-    found = _point_at_tesseract(pytesseract)
-    languages: set[str] = set()
-    if found:
-        try:
-            languages = set(pytesseract.get_languages(config=""))
-        except Exception:
-            found = False
-            languages = set()
-    _probe_cache = (pytesseract if found else None, ocr_gap(found, languages), languages)
-    return _probe_cache
+        return (None, ocr_gap(False, None), set())
+    local = _ready_local(ENGINE_ROOT)
+    if local is not None:
+        return _bind(pytesseract, local)
+    system = _system_reading(pytesseract)
+    if system is not None:
+        return system
+    try:
+        local = ensure_local_engine(ENGINE_ROOT)
+    except Exception as exc:
+        reason = str(exc).splitlines()[0][:200]
+        gap = f"{ocr_gap(False, None)} Automatic fetch failed: {reason}"
+        return (None, gap, set())
+    return _bind(pytesseract, local)
+
+
+def _bind(pytesseract, local: LocalEngine) -> tuple[object | None, str | None, set[str]]:
+    pytesseract.pytesseract.tesseract_cmd = str(local.binary)
+    os.environ["TESSDATA_PREFIX"] = str(local.tessdata)
+    languages = _languages(pytesseract)
+    gap = ocr_gap(True, languages)
+    if gap:
+        return (None, gap, languages)
+    return (pytesseract, None, languages)
+
+
+def _system_reading(pytesseract) -> tuple[object, None, set[str]] | None:
+    if not _point_at_tesseract(pytesseract):
+        return None
+    prefix = os.environ.get("TESSDATA_PREFIX")
+    own = str((ENGINE_ROOT / "tessdata").resolve()) if ENGINE_ROOT.exists() else ""
+    hidden = False
+    if prefix and own and str(Path(prefix).resolve()) == own:
+        os.environ.pop("TESSDATA_PREFIX", None)
+        hidden = True
+    languages = _languages(pytesseract)
+    if ocr_gap(True, languages) is None:
+        return (pytesseract, None, languages)
+    if hidden and prefix is not None:
+        os.environ["TESSDATA_PREFIX"] = prefix
+    return None
 
 
 def _point_at_tesseract(pytesseract) -> bool:
-    if shutil.which("tesseract"):
+    found = shutil.which("tesseract")
+    if found:
+        pytesseract.pytesseract.tesseract_cmd = found
         return True
     for candidate in _WINDOWS_TESSERACT:
         if os.path.isfile(candidate):
@@ -193,6 +331,116 @@ def _point_at_tesseract(pytesseract) -> bool:
             return True
     command = str(getattr(pytesseract.pytesseract, "tesseract_cmd", "") or "")
     return bool(command and os.path.isfile(command))
+
+
+def _languages(pytesseract) -> set[str]:
+    try:
+        return set(pytesseract.get_languages(config=""))
+    except Exception:
+        return set()
+
+
+def _engine_spec() -> _EngineSpec | None:
+    system = platform.system().lower()
+    machine = platform.machine().lower()
+    if machine not in {"amd64", "x86_64"}:
+        return None
+    return _ENGINE_SPECS.get(system)
+
+
+def _ready_local(root: Path) -> LocalEngine | None:
+    spec = _engine_spec()
+    if spec is None:
+        return None
+    binary = root / spec.binary_name
+    tessdata = root / "tessdata"
+    if not binary.is_file():
+        return None
+    for name, asset in _LANG_FILES.items():
+        path = tessdata / name
+        if not path.is_file() or _sha256(path) != asset.sha256:
+            return None
+    return LocalEngine(binary, tessdata)
+
+
+def _download(asset: _Asset) -> bytes:
+    request = urllib.request.Request(asset.url, headers={"User-Agent": "dockbot"})
+    try:
+        with urllib.request.urlopen(request, timeout=120) as response:
+            payload = _read_limited(response, _DOWNLOAD_LIMIT)
+    except urllib.error.HTTPError as exc:
+        raise RuntimeError(f"download failed (HTTP {exc.code})") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(
+            f"download failed ({exc.reason.__class__.__name__})"
+        ) from exc
+    if hashlib.sha256(payload).hexdigest() != asset.sha256:
+        raise RuntimeError("download checksum did not match")
+    return payload
+
+
+def _read_limited(response, limit: int) -> bytes:
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = response.read(1 << 16)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > limit:
+            raise RuntimeError("download is larger than expected")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def _extract_engine(payload: bytes, root: Path, binary_name: str) -> None:
+    root.mkdir(parents=True, exist_ok=True)
+    found = False
+    with tarfile.open(fileobj=io.BytesIO(payload), mode="r:gz") as archive:
+        for member in archive.getmembers():
+            if not member.isfile() or member.size > _DOWNLOAD_LIMIT:
+                continue
+            pure = PurePosixPath(member.name.replace("\\", "/"))
+            if pure.is_absolute() or ".." in pure.parts:
+                continue
+            extracted = archive.extractfile(member)
+            if extracted is None:
+                continue
+            if pure.as_posix() == f"bin/{binary_name}":
+                target = root / binary_name
+                _write_bytes(target, extracted.read())
+                target.chmod(0o755)
+                found = True
+                continue
+            if pure.parts and pure.parts[0] == "LICENSES":
+                target = root.joinpath(*pure.parts)
+                if _inside(root, target):
+                    _write_bytes(target, extracted.read())
+    if not found:
+        raise RuntimeError(f"archive has no {binary_name}")
+
+
+def _write_bytes(path: Path, payload: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".part")
+    temporary.write_bytes(payload)
+    temporary.replace(path)
+
+
+def _inside(root: Path, target: Path) -> bool:
+    try:
+        target.resolve().relative_to(root.resolve())
+    except ValueError:
+        return False
+    return True
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 16), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _read_text(engine, image: bytes, plate: str, driver_name: str, languages: set[str]) -> str:
