@@ -145,6 +145,9 @@ class Gate(Base):
     is_active: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=text("true")
     )
+    light_only: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
 
     __table_args__ = (
         CheckConstraint("char_length(btrim(code)) > 0", name="ck_gates_code"),
@@ -189,8 +192,14 @@ class Booking(Base):
     make: Mapped[str] = mapped_column(String(MAKE_MAX), nullable=False)
     driver_name: Mapped[str] = mapped_column(String(DRIVER_NAME_MAX), nullable=False)
     cargo_type: Mapped[str] = mapped_column(String(CARGO_MAX), nullable=False)
-    driver_telegram_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    driver_chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    driver_telegram_id: Mapped[int | None] = mapped_column(BigInteger)
+    driver_chat_id: Mapped[int | None] = mapped_column(BigInteger)
+    vehicle_kind: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="heavy", server_default=text("'heavy'")
+    )
+    urgent: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
     status: Mapped[BookingStatus] = mapped_column(BOOKING_STATUS, nullable=False)
     pass_token: Mapped[str] = mapped_column(String(128), nullable=False, unique=True)
     pass_pin: Mapped[str] = mapped_column(String(16), nullable=False)
@@ -207,6 +216,7 @@ class Booking(Base):
     reminded_2_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     reminded_30_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     rescheduled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    departed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     __table_args__ = (
         CheckConstraint("slot_end > slot_start", name="ck_bookings_slot_order"),
@@ -220,6 +230,9 @@ class Booking(Base):
         ),
         CheckConstraint("char_length(pass_token) > 0", name="ck_bookings_pass_token"),
         CheckConstraint("char_length(pass_pin) > 0", name="ck_bookings_pass_pin"),
+        CheckConstraint(
+            "vehicle_kind IN ('light', 'heavy')", name="ck_bookings_vehicle_kind"
+        ),
         Index("ix_bookings_driver_slot", "driver_telegram_id", "slot_start"),
         Index("ix_bookings_slot_start", "slot_start"),
         Index(
@@ -251,6 +264,7 @@ class BookingStatusEvent(Base):
     to_status: Mapped[BookingStatus] = mapped_column(BOOKING_STATUS, nullable=False)
     source: Mapped[StatusSource] = mapped_column(STATUS_SOURCE, nullable=False)
     actor_telegram_id: Mapped[int | None] = mapped_column(BigInteger)
+    note: Mapped[str | None] = mapped_column(String(40))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -302,6 +316,9 @@ class SiteSettings(Base):
     late_after_minutes: Mapped[int] = mapped_column(
         Integer, nullable=False, default=15, server_default=text("15")
     )
+    buffer_minutes: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
 
     __table_args__ = (
         CheckConstraint("id = 1", name="ck_site_settings_singleton"),
@@ -320,4 +337,21 @@ class SiteSettings(Base):
         CheckConstraint(
             "late_after_minutes > 0", name="ck_site_settings_late_after"
         ),
+        CheckConstraint(
+            "buffer_minutes >= 0", name="ck_site_settings_buffer"
+        ),
+    )
+
+
+class CargoNorm(Base):
+    __tablename__ = "cargo_norms"
+
+    code: Mapped[str] = mapped_column(String(32), primary_key=True)
+    label: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    minutes: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    __table_args__ = (
+        CheckConstraint("char_length(btrim(code)) > 0", name="ck_cargo_norms_code"),
+        CheckConstraint("char_length(btrim(label)) > 0", name="ck_cargo_norms_label"),
+        CheckConstraint("minutes > 0", name="ck_cargo_norms_minutes"),
     )

@@ -11,7 +11,7 @@ from zoneinfo import ZoneInfo
 
 import cv2
 import numpy as np
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -35,10 +35,13 @@ os.environ["DATABASE_URL"] = _test_database_url()
 
 from dockbot.adminboard import (  # noqa: E402
     admin_dates,
+    day_summary,
     ensure_stand_staff,
     generate_window,
     list_gates,
+    set_cargo_minutes,
     set_slot_closed,
+    toggle_light_only,
 )
 from dockbot.access import (  # noqa: E402
     AccessDenied,
@@ -51,10 +54,16 @@ from dockbot.access import (  # noqa: E402
     verify_pin,
 )
 from dockbot.booking import (  # noqa: E402
+    BookingNotFound,
+    NotEditable,
     SlotTaken,
     Trip,
     create_booking,
+    list_live,
+    queue_note,
     slots_for_gate,
+    update_vehicle,
+    window_rules,
 )
 from dockbot.bot.keyboard import button_labels, keyboard_for  # noqa: E402
 from dockbot.checkpoint import (  # noqa: E402
@@ -62,6 +71,7 @@ from dockbot.checkpoint import (  # noqa: E402
     TransitionRejected,
     apply_mark,
     find_pass,
+    mark_departed,
     read_pass_image,
 )
 from dockbot.config import ConfigError, parse_staff_list  # noqa: E402
@@ -72,6 +82,7 @@ from dockbot.models import (  # noqa: E402
     BookingStatus,
     ClosedSlot,
     BookingStatusEvent,
+    CargoNorm,
     Gate,
     GateHour,
     NotificationLog,
@@ -83,6 +94,7 @@ from dockbot.models import (  # noqa: E402
 from dockbot.passes import new_token, qr_png  # noqa: E402
 from dockbot.qrscan import decode_qr  # noqa: E402
 from dockbot.shiftboard import (  # noqa: E402
+    actions_for,
     checkpoint_actions,
     load_shift,
     row_actions,
@@ -128,6 +140,7 @@ class StaffTests(unittest.TestCase):
                 session.flush()
                 self.gate_a = first.id
                 self.gate_b = second.id
+                session.execute(update(CargoNorm).values(minutes=60))
                 for gate_id in (first.id, second.id):
                     for weekday in range(1, 8):
                         session.add(
@@ -971,6 +984,250 @@ class StaffTests(unittest.TestCase):
         self.assertEqual(count, 12)
         again = generate_window(ENGINE, STAFF_TG, self.gate_a, TOMORROW)
         self.assertEqual(again, 12)
+
+    def test_window_rules_follow_settings(self) -> None:
+        text = window_rules(ENGINE)
+        self.assertIn("120 мин", text)
+        self.assertIn("15 мин", text)
+        self.assertNotIn("зашит", text)
+        with Session(ENGINE) as session:
+            with session.begin():
+                row = session.get(SiteSettings, 1)
+                assert row is not None
+                row.cancel_window_hours = 1
+                row.late_after_minutes = 30
+        changed = window_rules(ENGINE)
+        self.assertIn("60 мин", changed)
+        self.assertIn("30 мин", changed)
+        self.assertNotIn("120 мин", changed)
+
+    def test_vehicle_change_keeps_the_pass_and_closes_after_arrival(self) -> None:
+        trip = self._book(TOMORROW, 9)
+        token, pin = trip.pass_token, trip.pass_pin
+        updated = update_vehicle(
+            ENGINE,
+            telegram_id=DRIVER,
+            chat_id=DRIVER,
+            booking_id=trip.id,
+            plate="А777АА77",
+            make="ГАЗ",
+            driver_name="Петров",
+            cargo_type="Навал",
+            now=NOW,
+        )
+        self.assertEqual(updated.pass_token, token)
+        self.assertEqual(updated.pass_pin, pin)
+        self.assertEqual(updated.plate, "А777АА77")
+        self.assertEqual(updated.cargo_type, "Навал")
+        with self.assertRaises(BookingNotFound):
+            update_vehicle(
+                ENGINE,
+                telegram_id=OTHER_TG,
+                chat_id=OTHER_TG,
+                booking_id=trip.id,
+                plate="А888АА77",
+                make="ГАЗ",
+                driver_name="Петров",
+                cargo_type="Навал",
+                now=NOW,
+            )
+        self._staff(pin="2468", telegram_id=STAFF_TG)
+        apply_mark(ENGINE, STAFF_TG, trip.id, BookingStatus.arrived, now=NOW)
+        with self.assertRaises(NotEditable):
+            update_vehicle(
+                ENGINE,
+                telegram_id=DRIVER,
+                chat_id=DRIVER,
+                booking_id=trip.id,
+                plate="А999АА77",
+                make="ГАЗ",
+                driver_name="Петров",
+                cargo_type="Навал",
+                now=NOW,
+            )
+
+    def test_longer_cargo_blocks_the_next_hour_and_light_gate(self) -> None:
+        self._staff(pin="3333", telegram_id=STAFF_TG, name="Администратор", role=StaffRole.admin)
+        set_cargo_minutes(ENGINE, STAFF_TG, "pallets", 120)
+        start = _at(TOMORROW, 8)
+        create_booking(
+            ENGINE,
+            gate_id=self.gate_a,
+            slot_start=start,
+            plate="A100AA77",
+            make="КАМАЗ",
+            driver_name="Иванов",
+            cargo_type="Паллеты",
+            telegram_id=DRIVER,
+            chat_id=DRIVER,
+            now=NOW,
+        )
+        offered = slots_for_gate(ENGINE, TOMORROW, self.gate_a, now=NOW, cargo="Паллеты")
+        self.assertNotIn(_at(TOMORROW, 9), [slot.start for slot in offered])
+        with self.assertRaises(SlotTaken):
+            create_booking(
+                ENGINE,
+                gate_id=self.gate_a,
+                slot_start=_at(TOMORROW, 9),
+                plate="B200BB77",
+                make="КАМАЗ",
+                driver_name="Иванов",
+                cargo_type="Паллеты",
+                telegram_id=DRIVER + 1,
+                chat_id=DRIVER + 1,
+                now=NOW,
+            )
+        toggle_light_only(ENGINE, STAFF_TG, self.gate_b)
+        heavy = slots_for_gate(
+            ENGINE, TOMORROW, self.gate_b, now=NOW, cargo="Паллеты", vehicle="heavy"
+        )
+        light = slots_for_gate(
+            ENGINE, TOMORROW, self.gate_b, now=NOW, cargo="Паллеты", vehicle="light"
+        )
+        self.assertEqual(heavy, [])
+        self.assertTrue(light)
+        set_cargo_minutes(ENGINE, STAFF_TG, "pallets", 60)
+
+    def test_role_buttons_split_and_show_gate_load(self) -> None:
+        self._staff(pin="2468", telegram_id=STAFF_TG)
+        self._warehouse()
+        self._staff(pin="3333", telegram_id=OTHER_TG, name="Администратор", role=StaffRole.admin)
+        trip = self._book(TOMORROW, 10)
+        arrived = apply_mark(ENGINE, STAFF_TG, trip.id, BookingStatus.arrived, now=NOW)
+        guard = [item.label for item in actions_for(ENGINE, arrived, StaffRole.security)]
+        warehouse = [item.label for item in actions_for(ENGINE, arrived, StaffRole.warehouse)]
+        admin = [item.label for item in actions_for(ENGINE, arrived, StaffRole.admin)]
+        self.assertEqual(guard, [])
+        self.assertTrue(all(label.startswith("На воротах") for label in warehouse))
+        self.assertIn("· 0", warehouse[0])
+        self.assertTrue(any(label.startswith("На воротах") for label in admin))
+        unloading = apply_mark(
+            ENGINE, WAREHOUSE_TG, trip.id, BookingStatus.unloading, now=NOW
+        )
+        self.assertEqual(
+            [item.label for item in actions_for(ENGINE, unloading, StaffRole.security)],
+            [],
+        )
+        self.assertEqual(
+            [item.label for item in actions_for(ENGINE, unloading, StaffRole.warehouse)],
+            ["Разгружен"],
+        )
+        done = apply_mark(ENGINE, WAREHOUSE_TG, trip.id, BookingStatus.completed, now=NOW)
+        self.assertEqual(
+            [item.label for item in actions_for(ENGINE, done, StaffRole.security)],
+            ["Выехал"],
+        )
+        self.assertEqual(actions_for(ENGINE, done, StaffRole.warehouse), ())
+        left = mark_departed(ENGINE, STAFF_TG, trip.id, now=NOW)
+        self.assertEqual(left.status, BookingStatus.completed)
+        self.assertTrue(left.departed)
+        self.assertEqual(actions_for(ENGINE, left, StaffRole.security), ())
+
+    def test_queue_note_hides_other_plates_and_monitor_marks_wait(self) -> None:
+        self._staff(pin="2468", telegram_id=STAFF_TG)
+        self._warehouse()
+        first = self._book(TOMORROW, 8)
+        second = self._create(
+            _at(TOMORROW, 9), telegram_id=DRIVER + 4, plate="B200BB77"
+        )
+        apply_mark(ENGINE, STAFF_TG, first.id, BookingStatus.arrived, now=NOW)
+        later = apply_mark(ENGINE, STAFF_TG, second.id, BookingStatus.arrived, now=NOW)
+        note = queue_note(ENGINE, later)
+        assert note is not None
+        self.assertIn("Впереди на этих воротах: 1", note)
+        self.assertNotIn(first.plate, note)
+        self.assertIn("Разгрузка ещё не началась", note)
+        self.assertIn("План:", note)
+        waiting = self._insert(
+            start=_at(TODAY, 8),
+            status=BookingStatus.arrived,
+            pin="121212",
+            plate="WAIT1",
+        )
+        unloading = self._insert(
+            start=_at(TODAY, 7),
+            status=BookingStatus.unloading,
+            pin="131313",
+            plate="LONG1",
+            gate_id=self.gate_b,
+        )
+        with Session(ENGINE) as session:
+            with session.begin():
+                session.add(
+                    BookingStatusEvent(
+                        booking_id=waiting,
+                        from_status=BookingStatus.confirmed,
+                        to_status=BookingStatus.arrived,
+                        source=StatusSource.staff,
+                        actor_telegram_id=STAFF_TG,
+                        created_at=NOW - timedelta(minutes=25),
+                    )
+                )
+                session.add(
+                    BookingStatusEvent(
+                        booking_id=unloading,
+                        from_status=BookingStatus.arrived,
+                        to_status=BookingStatus.unloading,
+                        source=StatusSource.staff,
+                        actor_telegram_id=STAFF_TG,
+                        created_at=NOW - timedelta(minutes=90),
+                    )
+                )
+        _zone, _day, trips = load_shift(ENGINE, WAREHOUSE_TG, now=NOW)
+        by_plate = {trip.plate: trip for trip in trips}
+        self.assertEqual(by_plate["WAIT1"].wait_minutes, 25)
+        self.assertFalse(by_plate["WAIT1"].overrun)
+        self.assertEqual(by_plate["LONG1"].wait_minutes, 90)
+        self.assertTrue(by_plate["LONG1"].overrun)
+        silent = self._insert(
+            start=_at(TODAY, 11),
+            status=BookingStatus.unloading,
+            pin="141414",
+            plate="QUIET1",
+        )
+        del silent
+        _zone, _day, again = load_shift(ENGINE, WAREHOUSE_TG, now=NOW)
+        quiet = next(trip for trip in again if trip.plate == "QUIET1")
+        self.assertIsNone(quiet.wait_minutes)
+
+    def test_day_summary_counts_lateness_and_cargo_average(self) -> None:
+        self._staff(pin="3333", telegram_id=STAFF_TG, name="Администратор", role=StaffRole.admin)
+        trip = self._book(TODAY, 10)
+        apply_mark(ENGINE, STAFF_TG, trip.id, BookingStatus.arrived, now=NOW)
+        apply_mark(ENGINE, STAFF_TG, trip.id, BookingStatus.unloading, now=NOW)
+        apply_mark(
+            ENGINE,
+            STAFF_TG,
+            trip.id,
+            BookingStatus.completed,
+            now=NOW + timedelta(minutes=40),
+        )
+        facts = day_summary(ENGINE, STAFF_TG, NOW)
+        self.assertEqual(facts.on_time, 1)
+        self.assertEqual(facts.late, 0)
+        self.assertEqual(facts.averages[0].cargo, trip.cargo_type)
+        self.assertEqual(facts.averages[0].minutes, 40)
+
+    def test_desk_booking_has_no_driver_chat(self) -> None:
+        trip = create_booking(
+            ENGINE,
+            gate_id=self.gate_a,
+            slot_start=_at(TOMORROW, 11),
+            plate="A100AA77",
+            make="КАМАЗ",
+            driver_name="Иванов",
+            cargo_type="Паллеты",
+            telegram_id=None,
+            chat_id=None,
+            now=NOW,
+        )
+        self.assertTrue(trip.no_driver_chat)
+        self.assertEqual(list_live(ENGINE, DRIVER, DRIVER), [])
+        with Session(ENGINE) as session:
+            row = session.get(Booking, trip.id)
+            assert row is not None
+            self.assertIsNone(row.driver_chat_id)
+            self.assertIsNone(row.driver_telegram_id)
 
     def _wipe(self) -> None:
         with Session(ENGINE) as session:

@@ -32,6 +32,7 @@ CANCEL_PREFIX = "cx:ask:"
 CANCEL_YES_PREFIX = "cx:yes:"
 CANCEL_NO_PREFIX = "cx:no:"
 MOVE_PREFIX = "mv:pick:"
+PARTY_PREFIX = "my:party:"
 PAGE_PREFIX = "my:page:"
 PAGE_SIZE = 8
 MENU = NAV_MENU
@@ -175,11 +176,35 @@ def slots_markup(
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def cargo_markup() -> InlineKeyboardMarkup:
-    rows = [
-        [InlineKeyboardButton(text=label, callback_data=f"{CARGO_PREFIX}{code}")]
-        for code, label in _CARGOS
-    ]
+def vehicle_markup() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Малотоннажный", callback_data="bk:veh:light")],
+            [InlineKeyboardButton(text="Обычный", callback_data="bk:veh:heavy")],
+            [InlineKeyboardButton(text="Отмена", callback_data=ABORT)],
+        ]
+    )
+
+
+def urgent_markup() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Срочный", callback_data="bk:urgent:1")],
+            [InlineKeyboardButton(text="Обычный", callback_data="bk:urgent:0")],
+            [InlineKeyboardButton(text="Отмена", callback_data=ABORT)],
+        ]
+    )
+
+
+def cargo_markup(minutes: dict[str, int] | None = None) -> InlineKeyboardMarkup:
+    rows = []
+    for code, label in _CARGOS:
+        title = label
+        if minutes and code in minutes:
+            title = f"{label} · {minutes[code]} мин"
+        rows.append(
+            [InlineKeyboardButton(text=title, callback_data=f"{CARGO_PREFIX}{code}")]
+        )
     rows.append([InlineKeyboardButton(text="Отмена", callback_data=ABORT)])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -272,6 +297,14 @@ def card_markup(trip: Trip, can_change: bool) -> InlineKeyboardMarkup:
                 InlineKeyboardButton(
                     text="Перенести",
                     callback_data=f"{MOVE_PREFIX}{trip.id}",
+                )
+            ]
+        )
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="Заменить машину",
+                    callback_data=f"{PARTY_PREFIX}{trip.id}",
                 )
             ]
         )
