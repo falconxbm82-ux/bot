@@ -21,11 +21,13 @@ from dockbot.booking import (
     clean_cargo,
     clean_driver_name,
     clean_make,
+    clean_weight_tons,
     create_booking,
     gates_with_slots,
     load_zone,
     normalize_plate,
     slots_for_gate,
+    window_phrase,
 )
 from dockbot.bot.keyboard import keyboard_for
 from dockbot.bot.ui import (
@@ -43,6 +45,7 @@ from dockbot.bot.ui import (
     slots_markup,
     urgent_markup,
     vehicle_markup,
+    weight_markup,
 )
 from dockbot.models import StaffRole
 from dockbot.passes import qr_png
@@ -63,6 +66,8 @@ class DeskFlow(StatesGroup):
     vehicle = State()
     cargo = State()
     cargo_note = State()
+    weight = State()
+    weight_note = State()
     urgent = State()
     date = State()
     gate = State()
@@ -105,8 +110,8 @@ async def desk_cargo(query: CallbackQuery, state: FSMContext) -> None:
         await query.answer("Кнопка устарела", show_alert=True)
         return
     await state.update_data(cargo=label)
-    await state.set_state(DeskFlow.urgent)
-    await reply(query, "Срочность рейса.", urgent_markup())
+    await state.set_state(DeskFlow.weight)
+    await reply(query, "Вес груза, тонны.", weight_markup())
 
 
 @router.message(DeskFlow.cargo_note, F.text)
@@ -117,8 +122,33 @@ async def desk_cargo_note(message: Message, state: FSMContext) -> None:
         await message.answer(str(exc))
         return
     await state.update_data(cargo=field.value)
-    await state.set_state(DeskFlow.urgent)
-    await message.answer("Срочность рейса.", reply_markup=urgent_markup())
+    await state.set_state(DeskFlow.weight)
+    await message.answer("Вес груза, тонны.", reply_markup=weight_markup())
+
+
+@router.callback_query(DeskFlow.weight, F.data.startswith("bk:weight:"))
+async def desk_weight(query: CallbackQuery, state: FSMContext, engine: Engine) -> None:
+    raw = (query.data or "").removeprefix("bk:weight:")
+    if raw == "other":
+        await state.set_state(DeskFlow.weight_note)
+        await reply(query, "Вес в тоннах, целое число от 1 до 40.", menu_markup())
+        return
+    if not raw.isdigit():
+        await query.answer("Кнопка устарела", show_alert=True)
+        return
+    await state.update_data(weight_kg=int(raw))
+    await _urgent(query, state, engine)
+
+
+@router.message(DeskFlow.weight_note, F.text)
+async def desk_weight_note(message: Message, state: FSMContext, engine: Engine) -> None:
+    try:
+        weight_kg = clean_weight_tons(message.text or "")
+    except FieldError as exc:
+        await message.answer(str(exc))
+        return
+    await state.update_data(weight_kg=weight_kg)
+    await _urgent(message, state, engine)
 
 
 @router.callback_query(DeskFlow.urgent, F.data.startswith("bk:urgent:"))
@@ -221,6 +251,7 @@ async def desk_name(message: Message, state: FSMContext, engine: Engine) -> None
             chat_id=None,
             vehicle=data.get("vehicle") or "heavy",
             urgent=bool(data.get("urgent")),
+            weight_kg=data.get("weight_kg"),
         )
     except SlotTaken as exc:
         await message.answer(str(exc))
@@ -254,6 +285,7 @@ async def _dates(event, state: FSMContext, engine: Engine) -> None:
             engine,
             cargo=data.get("cargo"),
             vehicle=data.get("vehicle"),
+            weight_kg=data.get("weight_kg"),
         )
     except SiteNotConfigured as exc:
         await state.clear()
@@ -268,7 +300,11 @@ async def _dates(event, state: FSMContext, engine: Engine) -> None:
             menu_markup(),
         )
         return
-    await reply(event, "Выберите дату.", dates_markup(days))
+    text = "Выберите дату."
+    phrase = await _window(engine, data)
+    if phrase:
+        text = f"{phrase}\n{text}"
+    await reply(event, text, dates_markup(days))
 
 
 async def _gates(event, state: FSMContext, engine: Engine) -> None:
@@ -280,6 +316,7 @@ async def _gates(event, state: FSMContext, engine: Engine) -> None:
         day,
         cargo=data.get("cargo"),
         vehicle=data.get("vehicle"),
+        weight_kg=data.get("weight_kg"),
     )
     await state.set_state(DeskFlow.gate)
     if not gates:
@@ -295,7 +332,11 @@ async def _slots(event, state: FSMContext, engine: Engine) -> None:
     if not choices:
         await reply(event, "Свободных окон нет. Выберите другие ворота.", menu_markup())
         return
-    await reply(event, "Выберите окно.", slots_markup(choices, zone))
+    text = "Выберите окно."
+    phrase = await _window(engine, data)
+    if phrase:
+        text = f"{phrase}\n{text}"
+    await reply(event, text, slots_markup(choices, zone))
 
 
 async def _selected(engine: Engine, data: dict):
@@ -313,9 +354,28 @@ async def _choices(engine: Engine, data: dict):
         int(data["gate_id"]),
         cargo=data.get("cargo"),
         vehicle=data.get("vehicle"),
+        weight_kg=data.get("weight_kg"),
     )
     zone = await asyncio.to_thread(load_zone, engine)
     return choices, zone
+
+
+async def _urgent(event, state: FSMContext, engine: Engine) -> None:
+    data = await state.get_data()
+    phrase = await _window(engine, data)
+    text = "Срочность рейса."
+    if phrase:
+        text = f"{phrase}\n{text}"
+    await state.set_state(DeskFlow.urgent)
+    await reply(event, text, urgent_markup())
+
+
+async def _window(engine: Engine, data: dict) -> str:
+    cargo = data.get("cargo")
+    weight = data.get("weight_kg")
+    if not cargo or not weight:
+        return ""
+    return await asyncio.to_thread(window_phrase, engine, cargo, int(weight))
 
 
 async def _admin(query: CallbackQuery, engine: Engine) -> bool:

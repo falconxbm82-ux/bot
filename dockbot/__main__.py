@@ -17,6 +17,7 @@ from dockbot.config import ConfigError, load_settings, redact
 from dockbot.adminboard import ensure_stand_staff
 from dockbot.configure import apply_configuration
 from dockbot.db import make_engine, upgrade_head
+from dockbot.documents import prepare_ocr
 from dockbot.logging_setup import resolve_log_directory, setup_logging
 
 log = logging.getLogger("dockbot")
@@ -40,6 +41,7 @@ def main() -> None:
             with engine.connect() as connection:
                 connection.execute(text("SELECT 1"))
             log.info("database connection ok")
+            prepare_ocr()
             asyncio.run(run_bot(settings, engine))
         finally:
             log.info("process stopping")

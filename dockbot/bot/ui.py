@@ -33,6 +33,7 @@ CANCEL_YES_PREFIX = "cx:yes:"
 CANCEL_NO_PREFIX = "cx:no:"
 MOVE_PREFIX = "mv:pick:"
 PARTY_PREFIX = "my:party:"
+DOC_PREFIX = "my:doc:"
 PAGE_PREFIX = "my:page:"
 PAGE_SIZE = 8
 MENU = NAV_MENU
@@ -196,6 +197,60 @@ def urgent_markup() -> InlineKeyboardMarkup:
     )
 
 
+_WEIGHT_TONS = (1, 5, 10, 15, 20, 30)
+
+
+def weight_markup() -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    row: list[InlineKeyboardButton] = []
+    for tons in _WEIGHT_TONS:
+        row.append(
+            InlineKeyboardButton(
+                text=f"{tons} т",
+                callback_data=f"bk:weight:{tons * 1000}",
+            )
+        )
+        if len(row) == 3:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    rows.append(
+        [InlineKeyboardButton(text="Другой вес", callback_data="bk:weight:other")]
+    )
+    rows.append([InlineKeyboardButton(text="Отмена", callback_data=ABORT)])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def document_confirm_markup(booking_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="Сходится",
+                    callback_data=f"my:doc-yes:{booking_id}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="Расхождение",
+                    callback_data=f"my:doc-no:{booking_id}",
+                )
+            ],
+        ]
+    )
+
+
+def document_markup() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Сходится", callback_data="bk:doc:match")],
+            [InlineKeyboardButton(text="Расхождение", callback_data="bk:doc:mismatch")],
+            [InlineKeyboardButton(text="Отмена", callback_data=ABORT)],
+        ]
+    )
+
+
 def cargo_markup(minutes: dict[str, int] | None = None) -> InlineKeyboardMarkup:
     rows = []
     for code, label in _CARGOS:
@@ -288,6 +343,15 @@ def card_markup(trip: Trip, can_change: bool) -> InlineKeyboardMarkup:
                 InlineKeyboardButton(
                     text="Показать пропуск",
                     callback_data=f"{PASS_PREFIX}{trip.id}",
+                )
+            ]
+        )
+    if can_change and not trip.doc_name:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="Фото документа",
+                    callback_data=f"{DOC_PREFIX}{trip.id}",
                 )
             ]
         )

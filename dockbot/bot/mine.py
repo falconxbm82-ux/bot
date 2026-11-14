@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import logging
 
 from aiogram import F, Router
@@ -18,8 +19,10 @@ from dockbot.booking import (
     NotEditable,
     SiteNotConfigured,
     WindowClosed,
+    bind_document,
     cancel_booking,
     change_block,
+    confirm_document,
     clean_cargo,
     clean_driver_name,
     clean_make,
@@ -37,7 +40,10 @@ from dockbot.bot.ui import (
     CANCEL_NO_PREFIX,
     CANCEL_PREFIX,
     CANCEL_YES_PREFIX,
+    DOC_PREFIX,
     MOVE_PREFIX,
+    cancel_step_markup,
+    document_confirm_markup,
     OPEN_PREFIX,
     PAGE_PREFIX,
     PASS_PREFIX,
@@ -46,7 +52,6 @@ from dockbot.bot.ui import (
     GEO,
     PARTY_PREFIX,
     card_markup,
-    cancel_step_markup,
     cargo_markup,
     empty_bookings_markup,
     reply,
@@ -65,6 +70,10 @@ _CARGO_LABELS = {
     "liquid": "Жидкость",
     "reefer": "Рефрижератор",
 }
+
+
+class DocFlow(StatesGroup):
+    photo = State()
 
 
 class PartyFlow(StatesGroup):
@@ -377,6 +386,108 @@ async def _show_card(query: CallbackQuery, engine: Engine, booking_id: int) -> N
     await reply(query, await _described(engine, trip, zone, block), card_markup(trip, block is None))
 
 
+@router.callback_query(F.data.startswith(DOC_PREFIX))
+async def ask_document(query: CallbackQuery, state: FSMContext, engine: Engine) -> None:
+    ids = actor_ids(query)
+    booking_id = _id(query.data or "", DOC_PREFIX)
+    if ids is None or booking_id is None:
+        await query.answer()
+        return
+    try:
+        await asyncio.to_thread(get_owned, engine, ids[0], ids[1], booking_id)
+    except BookingNotFound as exc:
+        await query.answer(str(exc), show_alert=True)
+        return
+    await state.set_state(DocFlow.photo)
+    await state.update_data(booking_id=booking_id)
+    await reply(
+        query,
+        "Фото документа: путевой лист или водительское. На снимке госномер и ФИО.",
+        cancel_step_markup(),
+    )
+
+
+@router.message(DocFlow.photo, F.photo)
+async def save_own_document(message: Message, state: FSMContext, engine: Engine) -> None:
+    ids = actor_ids(message)
+    data = await state.get_data()
+    booking_id = data.get("booking_id")
+    if ids is None or not booking_id or not message.photo:
+        return
+    image = await _download(message)
+    file_id = message.photo[-1].file_id
+    try:
+        checked = await asyncio.to_thread(
+            bind_document,
+            engine,
+            telegram_id=ids[0],
+            chat_id=ids[1],
+            booking_id=int(booking_id),
+            file_id=file_id,
+            image=image or b"",
+        )
+    except BookingNotFound as exc:
+        await state.clear()
+        await message.answer(str(exc), reply_markup=driver_menu())
+        return
+    except FieldError as exc:
+        await message.answer(str(exc))
+        return
+    if not checked.confident or checked.verdict is None:
+        if checked.gap:
+            prompt = "Авточтение недоступно. Сверьте госномер и ФИО с бронью."
+        else:
+            prompt = "Текст на фото разобран не до конца. Сверьте госномер и ФИО с бронью."
+        await message.answer(
+            prompt,
+            reply_markup=document_confirm_markup(checked.trip.id),
+        )
+        await state.clear()
+        return
+    await state.clear()
+    zone = await asyncio.to_thread(load_zone, engine)
+    label = "сходится" if checked.verdict == "match" else "расхождение"
+    await message.answer(
+        f"Документ: {label}.\n" + card_text(checked.trip, zone, None),
+        reply_markup=card_markup(checked.trip, True),
+    )
+
+
+@router.message(DocFlow.photo)
+async def document_not_photo(message: Message) -> None:
+    await message.answer(
+        "Нужно фото документа. Пустой кадр и чужая бронь не проходят.",
+        reply_markup=cancel_step_markup(),
+    )
+
+
+@router.callback_query(F.data.startswith("my:doc-yes:"))
+@router.callback_query(F.data.startswith("my:doc-no:"))
+async def close_document(query: CallbackQuery, engine: Engine) -> None:
+    ids = actor_ids(query)
+    raw = query.data or ""
+    verdict = "match" if raw.startswith("my:doc-yes:") else "mismatch"
+    prefix = "my:doc-yes:" if verdict == "match" else "my:doc-no:"
+    booking_id = _id(raw, prefix)
+    if ids is None or booking_id is None:
+        await query.answer("Кнопка устарела", show_alert=True)
+        return
+    try:
+        trip = await asyncio.to_thread(
+            confirm_document,
+            engine,
+            telegram_id=ids[0],
+            chat_id=ids[1],
+            booking_id=booking_id,
+            verdict=verdict,
+        )
+        zone = await asyncio.to_thread(load_zone, engine)
+    except (BookingNotFound, FieldError) as exc:
+        await reply(query, str(exc), driver_menu())
+        return
+    await reply(query, card_text(trip, zone, None), card_markup(trip, True))
+
+
 @router.callback_query(F.data.startswith(PARTY_PREFIX))
 async def start_party(query: CallbackQuery, state: FSMContext, engine: Engine) -> None:
     ids = actor_ids(query)
@@ -498,6 +609,17 @@ async def _described(engine: Engine, trip, zone, block: str | None) -> str:
     if note:
         return f"{text}\n{note}"
     return text
+
+
+async def _download(message: Message) -> bytes | None:
+    if not message.photo:
+        return None
+    buffer = io.BytesIO()
+    try:
+        await message.bot.download(message.photo[-1], destination=buffer)
+    except Exception:
+        return None
+    return buffer.getvalue()
 
 
 def _id(data: str, prefix: str) -> int | None:

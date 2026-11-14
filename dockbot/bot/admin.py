@@ -24,6 +24,7 @@ from dockbot.adminboard import (
     CANCEL_CHOICES,
     LATE_CHOICES,
     NORM_CHOICES,
+    WEIGHT_STEP_CHOICES,
     AdminError,
     add_gate,
     admin_dates,
@@ -43,10 +44,11 @@ from dockbot.adminboard import (
     set_late_minutes,
     set_point,
     set_slot_closed,
+    set_weight_step,
     toggle_gate,
     toggle_light_only,
 )
-from dockbot.booking import cargo_norms
+from dockbot.booking import DURATION_CAP_MINUTES, WEIGHT_ADDON_MINUTES, cargo_norms, weight_step_kg
 from dockbot.bot.keyboard import keyboard_for
 from dockbot.bot.ui import MENU, menu_markup
 from dockbot.models import StaffRole
@@ -202,6 +204,7 @@ async def show_norms(query: CallbackQuery, engine: Engine) -> None:
     if not await _admin(query, engine):
         return
     norms = await asyncio.to_thread(cargo_norms, engine)
+    step = await asyncio.to_thread(weight_step_kg, engine)
     rows = []
     for code, label, minutes in norms:
         rows.append(
@@ -222,11 +225,25 @@ async def show_norms(query: CallbackQuery, engine: Engine) -> None:
                 for choice in NORM_CHOICES[2:]
             ]
         )
+    step_row = [
+        InlineKeyboardButton(
+            text=f"шаг {choice // 1000} т",
+            callback_data=f"ad:weight-step:{choice}",
+        )
+        for choice in WEIGHT_STEP_CHOICES
+    ]
+    rows.append(step_row[:2])
+    rows.append(step_row[2:])
     rows.append([InlineKeyboardButton(text="«« Назад", callback_data="ad:settings")])
     rows.append([InlineKeyboardButton(text="В меню", callback_data=MENU)])
     await _answer(
         query,
-        "Норматив разгрузки по типу груза. Свободные окна мастера станут этой длины.",
+        (
+            "Норма типа и шаг веса.\n"
+            f"Сейчас шаг {step // 1000} т: каждый следующий шаг добавляет "
+            f"{WEIGHT_ADDON_MINUTES} мин. Потолок {DURATION_CAP_MINUTES} мин.\n"
+            "Окно брони занимает ровно эти минуты."
+        ),
         InlineKeyboardMarkup(inline_keyboard=rows),
     )
 
@@ -241,6 +258,24 @@ async def save_norm(query: CallbackQuery, engine: Engine) -> None:
         return
     try:
         await asyncio.to_thread(set_cargo_minutes, engine, user_id, code, int(raw))
+    except AccessDenied:
+        await query.answer(RIGHTS, show_alert=True)
+        return
+    except AdminError as exc:
+        await query.answer(str(exc), show_alert=True)
+        return
+    await show_norms(query, engine)
+
+
+@router.callback_query(F.data.startswith("ad:weight-step:"))
+async def save_weight_step(query: CallbackQuery, engine: Engine) -> None:
+    user_id = _user_id(query)
+    raw = (query.data or "").removeprefix("ad:weight-step:")
+    if user_id is None or not raw.isdigit():
+        await query.answer("Кнопка устарела", show_alert=True)
+        return
+    try:
+        await asyncio.to_thread(set_weight_step, engine, user_id, int(raw))
     except AccessDenied:
         await query.answer(RIGHTS, show_alert=True)
         return
@@ -770,6 +805,7 @@ async def _show_settings(event: Message | CallbackQuery, engine: Engine) -> None
         f"Окно отмены: {current.cancel_minutes} мин\n"
         f"Опоздание: {current.late_minutes} мин\n"
         f"Зазор между машинами: {current.buffer_minutes} мин\n"
+        f"Шаг веса: {current.weight_step_kg // 1000} т\n"
         f"Адрес: {address}\n"
         f"Точка: {point}\n"
         "Напоминания 24 ч, 2 ч и 30 мин не меняются кнопками."

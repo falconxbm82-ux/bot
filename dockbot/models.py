@@ -200,6 +200,10 @@ class Booking(Base):
     urgent: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default=text("false")
     )
+    weight_kg: Mapped[int | None] = mapped_column(Integer)
+    doc_file_id: Mapped[str | None] = mapped_column(String(256))
+    doc_name: Mapped[str | None] = mapped_column(String(64))
+    doc_result: Mapped[str | None] = mapped_column(String(16))
     status: Mapped[BookingStatus] = mapped_column(BOOKING_STATUS, nullable=False)
     pass_token: Mapped[str] = mapped_column(String(128), nullable=False, unique=True)
     pass_pin: Mapped[str] = mapped_column(String(16), nullable=False)
@@ -232,6 +236,14 @@ class Booking(Base):
         CheckConstraint("char_length(pass_pin) > 0", name="ck_bookings_pass_pin"),
         CheckConstraint(
             "vehicle_kind IN ('light', 'heavy')", name="ck_bookings_vehicle_kind"
+        ),
+        CheckConstraint(
+            "weight_kg IS NULL OR (weight_kg >= 1000 AND weight_kg <= 40000)",
+            name="ck_bookings_weight",
+        ),
+        CheckConstraint(
+            "doc_result IS NULL OR doc_result IN ('match', 'mismatch')",
+            name="ck_bookings_doc_result",
         ),
         Index("ix_bookings_driver_slot", "driver_telegram_id", "slot_start"),
         Index("ix_bookings_slot_start", "slot_start"),
@@ -319,6 +331,9 @@ class SiteSettings(Base):
     buffer_minutes: Mapped[int] = mapped_column(
         Integer, nullable=False, default=0, server_default=text("0")
     )
+    weight_step_kg: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=5000, server_default=text("5000")
+    )
 
     __table_args__ = (
         CheckConstraint("id = 1", name="ck_site_settings_singleton"),
@@ -339,6 +354,10 @@ class SiteSettings(Base):
         ),
         CheckConstraint(
             "buffer_minutes >= 0", name="ck_site_settings_buffer"
+        ),
+        CheckConstraint(
+            "weight_step_kg > 0 AND weight_step_kg <= 20000",
+            name="ck_site_settings_weight_step",
         ),
     )
 

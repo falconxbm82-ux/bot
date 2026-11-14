@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import logging
 from datetime import date
 
@@ -22,6 +23,7 @@ from dockbot.booking import (
     clean_cargo,
     clean_driver_name,
     clean_make,
+    clean_weight_tons,
     booking_profile,
     cargo_norms,
     create_booking,
@@ -32,7 +34,9 @@ from dockbot.booking import (
     load_zone,
     reschedule_booking,
     slots_for_gate,
+    window_phrase,
 )
+from dockbot.documents import DocumentError, discard_document, read_document, save_document
 from dockbot.bot.driver import BOOK, driver_menu
 from dockbot.bot.keyboard import hide_keyboard
 from dockbot.bot.ui import (
@@ -52,6 +56,8 @@ from dockbot.bot.ui import (
     cancel_step_markup,
     cargo_markup,
     dates_markup,
+    document_markup,
+    weight_markup,
     urgent_markup,
     vehicle_markup,
     gates_markup,
@@ -79,6 +85,8 @@ _CARGO_LABELS = {
 class BookFlow(StatesGroup):
     vehicle = State()
     cargo_pick = State()
+    weight = State()
+    weight_note = State()
     urgent = State()
     date = State()
     gate = State()
@@ -86,6 +94,8 @@ class BookFlow(StatesGroup):
     plate = State()
     make = State()
     driver_name = State()
+    document = State()
+    document_check = State()
     cargo = State()
     cargo_note = State()
     summary = State()
@@ -126,7 +136,7 @@ async def pick_cargo_first(query: CallbackQuery, state: FSMContext) -> None:
         await query.answer("Кнопка устарела", show_alert=True)
         return
     await state.update_data(cargo=label)
-    await show_urgent(query, state)
+    await show_weight(query, state)
 
 
 @router.callback_query(BookFlow.urgent, F.data.startswith("bk:urgent:"))
@@ -137,6 +147,105 @@ async def pick_urgent(query: CallbackQuery, state: FSMContext, engine: Engine) -
         return
     await state.update_data(urgent=raw == "1")
     await show_dates(query, state, engine)
+
+
+@router.callback_query(BookFlow.weight, F.data.startswith("bk:weight:"))
+async def pick_weight(query: CallbackQuery, state: FSMContext, engine: Engine) -> None:
+    raw = (query.data or "").removeprefix("bk:weight:")
+    if raw == "other":
+        await state.set_state(BookFlow.weight_note)
+        await reply(query, "Вес в тоннах, целое число от 1 до 40.", cancel_step_markup())
+        return
+    if not raw.isdigit():
+        await query.answer("Кнопка устарела", show_alert=True)
+        return
+    await state.update_data(weight_kg=int(raw))
+    await _after_weight(query, state, engine)
+
+
+@router.message(BookFlow.weight_note, F.text)
+async def weight_text(message: Message, state: FSMContext, engine: Engine) -> None:
+    if await _aborted_text(message, state):
+        return
+    try:
+        weight_kg = clean_weight_tons(message.text or "")
+    except FieldError as exc:
+        await message.answer(str(exc))
+        return
+    await state.update_data(weight_kg=weight_kg)
+    await _after_weight(message, state, engine)
+
+
+@router.message(BookFlow.document, F.photo)
+async def document_photo(message: Message, state: FSMContext, engine: Engine) -> None:
+    user = message.from_user
+    if user is None or not message.photo:
+        return
+    image = await _photo_bytes(message)
+    data = await state.get_data()
+    plate = data.get("plate") or ""
+    name = data.get("driver_name") or ""
+    if not plate or not name:
+        await message.answer("Сначала укажите госномер и ФИО.")
+        return
+    try:
+        reading = await asyncio.to_thread(read_document, image or b"", plate, name)
+        stored = await asyncio.to_thread(save_document, image or b"")
+    except DocumentError as exc:
+        await message.answer(str(exc))
+        return
+    file_id = message.photo[-1].file_id
+    if not file_id or not file_id.strip():
+        discard_document(stored)
+        await message.answer("Фото пустое. Пришлите снимок документа.")
+        return
+    previous = data.get("doc_name")
+    if previous and previous != stored:
+        discard_document(previous)
+    await state.update_data(doc_file_id=file_id.strip(), doc_name=stored)
+    if reading.confident and reading.verdict == "match":
+        await state.update_data(doc_result=reading.verdict)
+        await message.answer("Документ: сходится.")
+        await show_summary(message, state, engine)
+        return
+    if reading.confident and reading.verdict == "mismatch":
+        await _reject_document(message, state, stored)
+        return
+    await state.update_data(doc_result=None)
+    await state.set_state(BookFlow.document_check)
+    if reading.gap:
+        prompt = "Авточтение недоступно. Сверьте госномер и ФИО с записью."
+    else:
+        prompt = "Текст на фото разобран не до конца. Сверьте госномер и ФИО с записью."
+    await message.answer(prompt, reply_markup=document_markup())
+
+
+@router.message(BookFlow.document)
+async def document_missing(message: Message, state: FSMContext) -> None:
+    if await _aborted_text(message, state):
+        return
+    await message.answer(
+        "Нужно фото документа: путевой лист или водительское. Пустой кадр не подойдёт.",
+        reply_markup=cancel_step_markup(),
+    )
+
+
+@router.callback_query(BookFlow.document_check, F.data.startswith("bk:doc:"))
+async def document_choice(query: CallbackQuery, state: FSMContext, engine: Engine) -> None:
+    verdict = (query.data or "").removeprefix("bk:doc:")
+    if verdict not in {"match", "mismatch"}:
+        await query.answer("Кнопка устарела", show_alert=True)
+        return
+    data = await state.get_data()
+    if not data.get("doc_name") or not data.get("doc_file_id"):
+        await reply(query, "Фото пустое. Пришлите снимок документа.", cancel_step_markup())
+        await state.set_state(BookFlow.document)
+        return
+    if verdict == "mismatch":
+        await _reject_document(query, state, data.get("doc_name"))
+        return
+    await state.update_data(doc_result=verdict)
+    await show_summary(query, state, engine)
 
 
 async def show_vehicle(
@@ -162,9 +271,40 @@ async def show_cargo_pick(
     )
 
 
-async def show_urgent(event: Message | CallbackQuery, state: FSMContext) -> None:
+async def show_weight(event: Message | CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(BookFlow.weight)
+    await reply(event, "Вес груза, тонны.", weight_markup())
+
+
+async def show_urgent(
+    event: Message | CallbackQuery, state: FSMContext, preface: str | None = None
+) -> None:
     await state.set_state(BookFlow.urgent)
-    await reply(event, "Срочность рейса.", urgent_markup())
+    text = "Срочность рейса."
+    if preface:
+        text = f"{preface}\n{text}"
+    await reply(event, text, urgent_markup())
+
+
+async def show_document(
+    event: Message | CallbackQuery, state: FSMContext, preface: str | None = None
+) -> None:
+    await state.set_state(BookFlow.document)
+    text = "Фото документа: путевой лист или водительское. На снимке госномер и ФИО."
+    if preface:
+        text = f"{preface}\n{text}"
+    await reply(event, text, cancel_step_markup())
+
+
+async def _after_weight(
+    event: Message | CallbackQuery, state: FSMContext, engine: Engine
+) -> None:
+    data = await state.get_data()
+    phrase = await _phrase(engine, data)
+    if data.get("driver_name"):
+        await show_document(event, state, phrase or None)
+        return
+    await show_urgent(event, state, phrase or None)
 
 
 async def begin_move(
@@ -178,6 +318,7 @@ async def begin_move(
 async def abort(query: CallbackQuery, state: FSMContext) -> None:
     data = await state.get_data()
     await state.clear()
+    discard_document(data.get("doc_name"))
     if data.get("mode") == "move":
         text = "Диалог сброшен. Бронь не изменена."
     else:
@@ -270,8 +411,12 @@ async def name_step(message: Message, state: FSMContext, engine: Engine) -> None
         await message.answer(str(exc))
         return
     await state.update_data(driver_name=field.value)
-    if (await state.get_data()).get("cargo"):
-        await show_summary(message, state, engine)
+    data = await state.get_data()
+    if data.get("cargo") and data.get("weight_kg"):
+        await show_document(message, state)
+        return
+    if data.get("cargo"):
+        await show_weight(message, state)
         return
     await state.set_state(BookFlow.cargo)
     await message.answer("Тип груза.", reply_markup=cargo_markup())
@@ -289,7 +434,14 @@ async def cargo_button(query: CallbackQuery, state: FSMContext, engine: Engine) 
         await query.answer("Кнопка устарела", show_alert=True)
         return
     await state.update_data(cargo=label)
-    await show_summary(query, state, engine)
+    data = await state.get_data()
+    if data.get("weight_kg") and data.get("driver_name"):
+        await show_document(query, state)
+        return
+    if data.get("weight_kg"):
+        await show_urgent(query, state)
+        return
+    await show_weight(query, state)
 
 
 @router.message(BookFlow.cargo, F.text)
@@ -312,8 +464,12 @@ async def cargo_note(message: Message, state: FSMContext, engine: Engine) -> Non
         await message.answer(str(exc))
         return
     await state.update_data(cargo=field.value)
-    if (await state.get_data()).get("slot_ts"):
-        await show_summary(message, state, engine)
+    data = await state.get_data()
+    if not data.get("weight_kg"):
+        await show_weight(message, state)
+        return
+    if data.get("driver_name"):
+        await show_document(message, state)
         return
     await show_urgent(message, state)
 
@@ -336,11 +492,17 @@ async def back_to_gates(query: CallbackQuery, state: FSMContext, engine: Engine)
 @router.callback_query(BookFlow.summary, F.data == EDIT)
 async def edit_details(query: CallbackQuery, state: FSMContext) -> None:
     data = await state.get_data()
+    discard_document(data.get("doc_name"))
     kept = {
         "mode": "create",
         "date": data.get("date"),
         "gate_id": data.get("gate_id"),
         "slot_ts": data.get("slot_ts"),
+        "vehicle": data.get("vehicle"),
+        "cargo": data.get("cargo"),
+        "weight_kg": data.get("weight_kg"),
+        "urgent": data.get("urgent"),
+        "keyboard_hidden": data.get("keyboard_hidden"),
     }
     await state.set_data(kept)
     await state.set_state(BookFlow.plate)
@@ -385,10 +547,16 @@ async def confirm(query: CallbackQuery, state: FSMContext, engine: Engine) -> No
             await reply(query, "Сводка устарела. Начните заново.", driver_menu())
             return
         if not moving and not all(
-            data.get(key) for key in ("plate", "make", "driver_name", "cargo")
+            data.get(key) for key in ("plate", "make", "driver_name", "cargo", "weight_kg")
         ):
             await state.clear()
             await reply(query, "Сводка устарела. Начните заново.", driver_menu())
+            return
+        if not moving and data.get("doc_result") != "match":
+            if data.get("doc_result") == "mismatch":
+                await reply(query, _MISMATCH_TEXT)
+                return
+            await show_document(query, state)
             return
         try:
             if moving:
@@ -415,6 +583,10 @@ async def confirm(query: CallbackQuery, state: FSMContext, engine: Engine) -> No
                     chat_id=chat_id,
                     vehicle=data.get("vehicle") or "heavy",
                     urgent=bool(data.get("urgent")),
+                    weight_kg=int(data["weight_kg"]),
+                    doc_file_id=data.get("doc_file_id"),
+                    doc_name=data.get("doc_name"),
+                    doc_result=data.get("doc_result"),
                 )
         except SlotTaken as exc:
             await show_slots(query, state, engine, preface=str(exc))
@@ -458,13 +630,14 @@ async def show_dates(
         await state.update_data(keyboard_hidden=True)
     ignore = int(data["booking_id"]) if moving and data.get("booking_id") else None
     try:
-        cargo, vehicle = await _party(engine, data)
+        cargo, vehicle, weight = await _party(engine, data)
         dates = await asyncio.to_thread(
             available_dates,
             engine,
             ignore_booking_id=ignore,
             cargo=cargo,
             vehicle=vehicle,
+            weight_kg=weight,
         )
     except SiteNotConfigured as exc:
         await state.clear()
@@ -479,6 +652,9 @@ async def show_dates(
         await reply(event, text, menu_markup())
         return
     text = "Выберите дату."
+    phrase = await _phrase(engine, data)
+    if phrase:
+        text = f"{phrase}\n{text}"
     if preface:
         text = f"{preface}\n{text}"
     await reply(event, text, dates_markup(dates))
@@ -495,7 +671,7 @@ async def show_gates(
     ignore = int(data["booking_id"]) if moving and data.get("booking_id") else None
     day = date.fromisoformat(data["date"])
     try:
-        cargo, vehicle = await _party(engine, data)
+        cargo, vehicle, weight = await _party(engine, data)
         gates = await asyncio.to_thread(
             gates_with_slots,
             engine,
@@ -503,6 +679,7 @@ async def show_gates(
             ignore_booking_id=ignore,
             cargo=cargo,
             vehicle=vehicle,
+            weight_kg=weight,
         )
     except SiteNotConfigured as exc:
         await state.clear()
@@ -557,6 +734,9 @@ async def show_slots(
                 current = None
     await state.set_state(MoveFlow.slot if moving else BookFlow.slot)
     text = "Выберите время."
+    phrase = await _phrase(engine, data)
+    if phrase:
+        text = f"{phrase}\n{text}"
     if preface:
         text = f"{preface}\n{text}"
     await reply(event, text, slots_markup(choices, zone, current))
@@ -599,12 +779,16 @@ async def show_summary(
             trip.driver_name,
             trip.cargo_type,
         )
+        weight_kg = trip.weight_kg
+        document = None
         await state.set_state(MoveFlow.summary)
     else:
         plate = data.get("plate", "")
         make = data.get("make", "")
         driver_name = data.get("driver_name", "")
         cargo = data.get("cargo", "")
+        weight_kg = data.get("weight_kg")
+        document = _doc_label(data.get("doc_result"))
         await state.set_state(BookFlow.summary)
     await reply(
         event,
@@ -621,19 +805,31 @@ async def show_summary(
             rules=await asyncio.to_thread(window_rules, engine),
             vehicle=None if moving else data.get("vehicle"),
             urgent=bool(data.get("urgent")),
+            weight_kg=weight_kg,
+            document=document,
         ),
         summary_markup(moving),
     )
 
 
-async def _party(engine: Engine, data: dict) -> tuple[str | None, str | None]:
+async def _party(
+    engine: Engine, data: dict
+) -> tuple[str | None, str | None, int | None]:
     if data.get("mode") == "move" and data.get("booking_id"):
         profile = await asyncio.to_thread(
             booking_profile, engine, int(data["booking_id"])
         )
         if profile is not None:
             return profile
-    return data.get("cargo"), data.get("vehicle")
+    weight = data.get("weight_kg")
+    return data.get("cargo"), data.get("vehicle"), None if weight is None else int(weight)
+
+
+async def _phrase(engine: Engine, data: dict) -> str:
+    cargo, _vehicle, weight = await _party(engine, data)
+    if not cargo or weight is None:
+        return ""
+    return await asyncio.to_thread(window_phrase, engine, cargo, weight)
 
 
 async def _slot_from_state(engine: Engine, data: dict):
@@ -655,7 +851,7 @@ async def _slot_choices(engine: Engine, data: dict):
     ignore = int(data["booking_id"]) if moving and data.get("booking_id") else None
     day = date.fromisoformat(data["date"])
     try:
-        cargo, vehicle = await _party(engine, data)
+        cargo, vehicle, weight = await _party(engine, data)
         choices = await asyncio.to_thread(
             slots_for_gate,
             engine,
@@ -664,6 +860,7 @@ async def _slot_choices(engine: Engine, data: dict):
             ignore_booking_id=ignore,
             cargo=cargo,
             vehicle=vehicle,
+            weight_kg=weight,
         )
         zone = await asyncio.to_thread(load_zone, engine)
     except SiteNotConfigured:
@@ -695,12 +892,45 @@ async def _aborted_text(message: Message, state: FSMContext) -> bool:
         return False
     data = await state.get_data()
     await state.clear()
+    discard_document(data.get("doc_name"))
     if data.get("mode") == "move":
         text = "Диалог сброшен. Бронь не изменена."
     else:
         text = "Диалог сброшен. Запись не сохранена."
     await message.answer(text, reply_markup=driver_menu())
     return True
+
+
+_MISMATCH_TEXT = (
+    "Документ: расхождение. Данные не сходятся. "
+    "ФИО на фото не совпадает с анкетой. Запись не завершена."
+)
+
+
+async def _reject_document(event: Message | CallbackQuery, state: FSMContext, name: str | None) -> None:
+    discard_document(name)
+    await state.update_data(doc_file_id=None, doc_name=None, doc_result=None)
+    await state.set_state(BookFlow.document)
+    await reply(event, _MISMATCH_TEXT, cancel_step_markup())
+
+
+def _doc_label(result: str | None) -> str | None:
+    if result == "match":
+        return "Документ: сходится"
+    if result == "mismatch":
+        return "Документ: расхождение"
+    return None
+
+
+async def _photo_bytes(message: Message) -> bytes | None:
+    if not message.photo:
+        return None
+    buffer = io.BytesIO()
+    try:
+        await message.bot.download(message.photo[-1], destination=buffer)
+    except Exception:
+        return None
+    return buffer.getvalue()
 
 
 async def _send_pass(

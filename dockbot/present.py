@@ -37,15 +37,40 @@ def day_button(day) -> str:
     return f"{_WEEKDAYS[day.weekday()]} {day.strftime('%d.%m')}"
 
 
+def cargo_detail(
+    cargo: str, weight_kg: int | None, start: datetime, end: datetime
+) -> str:
+    minutes = max(1, int((end - start).total_seconds() // 60))
+    parts = [cargo]
+    if weight_kg:
+        parts.append(f"{weight_kg // 1000} т")
+    parts.append(f"{minutes} мин")
+    return ", ".join(parts)
+
+
+def document_line(trip: Trip) -> str:
+    if trip.doc_result == "match":
+        return "Документ: сходится"
+    if trip.doc_result == "mismatch":
+        return "Документ: расхождение"
+    if trip.doc_name:
+        return "Документ: фото есть, сверка не закрыта"
+    return "Документ: нет фото"
+
+
 def pass_caption(trip: Trip, zone: ZoneInfo) -> str:
     date_text, clock = local_parts(trip.slot_start, trip.slot_end, zone)
-    return (
-        "Пропуск\n"
-        f"PIN: {trip.pass_pin}\n"
-        f"Дата: {date_text}\n"
-        f"Ворота: {gate_label(trip.gate_code)}\n"
-        f"Время: {clock}"
-    )
+    lines = [
+        "Пропуск",
+        f"PIN: {trip.pass_pin}",
+        f"Дата: {date_text}",
+        f"Ворота: {gate_label(trip.gate_code)}",
+        f"Время: {clock}",
+        f"Груз: {cargo_detail(trip.cargo_type, trip.weight_kg, trip.slot_start, trip.slot_end)}",
+    ]
+    if trip.doc_result or trip.doc_name:
+        lines.append(document_line(trip))
+    return "\n".join(lines)
 
 
 def summary_text(
@@ -62,6 +87,8 @@ def summary_text(
     rules: str | None = None,
     vehicle: str | None = None,
     urgent: bool = False,
+    weight_kg: int | None = None,
+    document: str | None = None,
 ) -> str:
     date_text, clock = local_parts(start, end, zone)
     title = "Перенос брони." if moving else "Проверьте запись."
@@ -73,8 +100,10 @@ def summary_text(
         f"Госномер: {plate}",
         f"Марка: {make}",
         f"ФИО: {driver_name}",
-        f"Груз: {cargo_type}",
+        f"Груз: {cargo_detail(cargo_type, weight_kg, start, end)}",
     ]
+    if document:
+        lines.append(document)
     if vehicle:
         lines.append("Транспорт: малотоннажный" if vehicle == "light" else "Транспорт: обычный")
     if urgent:
@@ -84,7 +113,12 @@ def summary_text(
     return "\n".join(lines)
 
 
-def card_text(trip: Trip, zone: ZoneInfo, block: str | None) -> str:
+def card_text(
+    trip: Trip,
+    zone: ZoneInfo,
+    block: str | None,
+    documents: str = "if_set",
+) -> str:
     date_text, clock = local_parts(trip.slot_start, trip.slot_end, zone)
     lines = [
         f"Дата: {date_text}",
@@ -93,9 +127,14 @@ def card_text(trip: Trip, zone: ZoneInfo, block: str | None) -> str:
         f"Госномер: {trip.plate}",
         f"Марка: {trip.make}",
         f"ФИО: {trip.driver_name}",
-        f"Груз: {trip.cargo_type}",
+        f"Груз: {cargo_detail(trip.cargo_type, trip.weight_kg, trip.slot_start, trip.slot_end)}",
         f"Статус: {STATUS_LABELS[trip.status]}",
     ]
+    show_document = documents == "always" or (
+        documents == "if_set" and (trip.doc_result or trip.doc_name)
+    )
+    if show_document:
+        lines.append(document_line(trip))
     if block:
         lines.append(block)
     return "\n".join(lines)
