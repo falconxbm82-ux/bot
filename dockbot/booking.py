@@ -118,6 +118,7 @@ class DocumentCheck:
     trip: Trip
     confident: bool
     verdict: str | None
+    gap: str | None = None
 
 
 @dataclass(frozen=True)
@@ -636,7 +637,7 @@ def bind_document(
             booking.doc_result = reading.verdict if reading.confident else None
             session.flush()
             trip = _trip(session, booking)
-    return DocumentCheck(trip, reading.confident, reading.verdict)
+    return DocumentCheck(trip, reading.confident, reading.verdict, reading.gap)
 
 
 def confirm_document(

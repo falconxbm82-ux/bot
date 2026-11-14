@@ -434,8 +434,12 @@ async def save_own_document(message: Message, state: FSMContext, engine: Engine)
         await message.answer(str(exc))
         return
     if not checked.confident or checked.verdict is None:
+        if checked.gap:
+            prompt = "Авточтение недоступно. Сверьте госномер и ФИО с бронью."
+        else:
+            prompt = "Текст на фото разобран не до конца. Сверьте госномер и ФИО с бронью."
         await message.answer(
-            "Текст на фото разобран не до конца. Сверьте госномер и ФИО с бронью.",
+            prompt,
             reply_markup=document_confirm_markup(checked.trip.id),
         )
         await state.clear()

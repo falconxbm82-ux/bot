@@ -211,10 +211,11 @@ async def document_photo(message: Message, state: FSMContext, engine: Engine) ->
         return
     await state.update_data(doc_result=None)
     await state.set_state(BookFlow.document_check)
-    await message.answer(
-        "Текст на фото разобран не до конца. Сверьте госномер и ФИО с записью.",
-        reply_markup=document_markup(),
-    )
+    if reading.gap:
+        prompt = "Авточтение недоступно. Сверьте госномер и ФИО с записью."
+    else:
+        prompt = "Текст на фото разобран не до конца. Сверьте госномер и ФИО с записью."
+    await message.answer(prompt, reply_markup=document_markup())
 
 
 @router.message(BookFlow.document)
