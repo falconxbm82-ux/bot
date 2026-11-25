@@ -231,7 +231,15 @@ class StaffTests(unittest.TestCase):
         self.assertNotIn("Сканировать QR", button_labels(warehouse))
         self.assertEqual(
             button_labels(admin),
-            ["Ворота", "Слоты", "Сотрудники", "Параметры", "Сводка дня", "Помощь"],
+            [
+                "Ворота",
+                "Слоты",
+                "Сотрудники",
+                "Параметры",
+                "Водители",
+                "Сводка дня",
+                "Помощь",
+            ],
         )
 
     def test_logout_clears_this_chat_and_keeps_the_pin(self) -> None:
@@ -618,7 +626,7 @@ class StaffTests(unittest.TestCase):
             TOMORROW,
             10,
             telegram_id=DRIVER + 8,
-            plate="В210ВВ77",
+            plate="В200ВВ77",
             driver_name="Петров Петр Петрович",
         )
         self._set_status(cancelled.id, BookingStatus.cancelled)
@@ -1027,7 +1035,7 @@ class StaffTests(unittest.TestCase):
             telegram_id=DRIVER,
             chat_id=DRIVER,
             booking_id=trip.id,
-            plate="А777АА77",
+            plate="В200ВВ77",
             make="ГАЗ",
             driver_name="Петров Петр Петрович",
             cargo_type="Навал",
@@ -1035,7 +1043,7 @@ class StaffTests(unittest.TestCase):
         )
         self.assertEqual(updated.pass_token, token)
         self.assertEqual(updated.pass_pin, pin)
-        self.assertEqual(updated.plate, "А777АА77")
+        self.assertEqual(updated.plate, "В200ВВ77")
         self.assertEqual(updated.cargo_type, "Навал")
         with self.assertRaises(BookingNotFound):
             update_vehicle(
@@ -1089,7 +1097,7 @@ class StaffTests(unittest.TestCase):
                 slot_start=_at(TOMORROW, 9),
                 plate="B200BB77",
                 make="КАМАЗ",
-                driver_name="Иванов Иван Иванович",
+                driver_name="Петров Петр Петрович",
                 cargo_type="Паллеты",
                 telegram_id=DRIVER + 1,
                 chat_id=DRIVER + 1,
@@ -1410,7 +1418,7 @@ class StaffTests(unittest.TestCase):
                 ENGINE,
                 gate_id=self.gate_a,
                 slot_start=_at(TOMORROW, 11),
-                plate="А123ВС178",
+                plate="А100АА77",
                 make="КАМАЗ",
                 driver_name="Иванов Иван Иванович",
                 cargo_type="Паллеты",
@@ -1424,7 +1432,7 @@ class StaffTests(unittest.TestCase):
                 chat_id=DRIVER + 6,
                 booking_id=other.id,
                 file_id="file-match",
-                image=_paper("А123ВС178", "Иванов Иван Иванович"),
+                image=_paper("А100АА77", "Иванов Иван Иванович"),
             )
             names.append(matched.trip.doc_name or "")
             self.assertEqual(matched.verdict, "match")

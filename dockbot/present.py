@@ -48,18 +48,42 @@ def cargo_detail(
     return ", ".join(parts)
 
 
-def unload_formula(base: int, addon: int, total: int) -> str:
+def unload_formula(
+    base: int,
+    addon: int,
+    total: int,
+    *,
+    cut: int = 0,
+    cap: int = DURATION_CAP_MINUTES,
+) -> str:
     """Короткая формула окна: база типа, добавка массы, итог и потолок."""
+    if cut:
+        return (
+            f"Разгрузка: база {base} мин, масса +{addon} мин, "
+            f"малотоннажный минус {cut} мин, итого {total} мин, потолок {cap}"
+        )
     return (
         f"Разгрузка: база {base} мин, масса +{addon} мин, "
-        f"итого {total} мин, потолок {DURATION_CAP_MINUTES}"
+        f"итого {total} мин, потолок {cap}"
     )
 
 
 def _formula_line(trip: Trip) -> str | None:
     if trip.unload_base is None or trip.unload_addon is None or trip.unload_total is None:
         return None
-    return unload_formula(trip.unload_base, trip.unload_addon, trip.unload_total)
+    return unload_formula(
+        trip.unload_base,
+        trip.unload_addon,
+        trip.unload_total,
+        cut=trip.unload_cut or 0,
+        cap=trip.unload_cap or DURATION_CAP_MINUTES,
+    )
+
+
+def _light_line(vehicle: str | None) -> str | None:
+    if vehicle == "light":
+        return "Транспорт: малотоннажный"
+    return None
 
 
 def document_line(trip: Trip) -> str:
@@ -82,6 +106,9 @@ def pass_caption(trip: Trip, zone: ZoneInfo) -> str:
         f"Время: {clock}",
         f"Груз: {cargo_detail(trip.cargo_type, trip.weight_kg, trip.slot_start, trip.slot_end)}",
     ]
+    light = _light_line(trip.vehicle_kind)
+    if light:
+        lines.append(light)
     formula = _formula_line(trip)
     if formula:
         lines.append(formula)
@@ -103,7 +130,6 @@ def summary_text(
     moving: bool,
     rules: str | None = None,
     vehicle: str | None = None,
-    urgent: bool = False,
     weight_kg: int | None = None,
     document: str | None = None,
     formula: str | None = None,
@@ -126,8 +152,6 @@ def summary_text(
         lines.append(document)
     if vehicle:
         lines.append("Транспорт: малотоннажный" if vehicle == "light" else "Транспорт: обычный")
-    if urgent:
-        lines.append("Рейс: срочный")
     if rules:
         lines.append(rules)
     return "\n".join(lines)
@@ -150,6 +174,9 @@ def card_text(
         f"Груз: {cargo_detail(trip.cargo_type, trip.weight_kg, trip.slot_start, trip.slot_end)}",
         f"Статус: {STATUS_LABELS[trip.status]}",
     ]
+    light = _light_line(trip.vehicle_kind)
+    if light:
+        lines.append(light)
     formula = _formula_line(trip)
     if formula:
         lines.append(formula)

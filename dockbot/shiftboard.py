@@ -60,8 +60,6 @@ def trip_line(trip: Trip, zone: ZoneInfo) -> str:
         f"{trip.driver_name} {detail} {STATUS_LABELS[trip.status]}"
     )
     marks: list[str] = []
-    if trip.urgent:
-        marks.append("срочно")
     if trip.wait_minutes is not None:
         marks.append(
             "ждёт меньше минуты" if trip.wait_minutes == 0 else f"ждёт {trip.wait_minutes} мин"
@@ -210,9 +208,8 @@ def _wait_minutes(session: Session, trip: Trip, now: datetime) -> int | None:
 
 def _rank(trip: Trip, now: datetime, zone: ZoneInfo) -> tuple:
     peak = 0 if trip.slot_start.astimezone(zone).hour == now.astimezone(zone).hour else 1
-    urgent = 0 if trip.urgent else 1
     reefer = 0 if trip.cargo_type == "Рефрижератор" else 1
-    return (urgent, reefer, peak, trip.slot_start, trip.gate_code, trip.id)
+    return (reefer, peak, trip.slot_start, trip.gate_code, trip.id)
 
 
 def shift_pages(

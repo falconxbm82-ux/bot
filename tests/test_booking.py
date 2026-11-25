@@ -158,37 +158,37 @@ class BookingTests(unittest.TestCase):
             self.assertEqual(event.source, StatusSource.driver)
 
     def test_same_plate_or_driver_cannot_book_the_same_day_twice(self) -> None:
+        from dockbot.booking import pair_booked_on
+        from dockbot.roster import NOT_LISTED
+
         first = self._book(TOMORROW, 8, plate="a100aa77")
         self.assertEqual(first.plate, "А100АА77")
-        with self.assertRaises(BookingError) as same_plate:
-            self._book(
-                TOMORROW,
-                9,
-                plate="А100АА77",
-                telegram_id=9,
-                chat_id=9,
-                driver_name="Петров Петр Петрович",
-            )
-        self.assertEqual(str(same_plate.exception), DAY_TAKEN)
-        with self.assertRaises(BookingError) as same_name:
-            self._book(
-                TOMORROW,
-                9,
-                plate="В200ВВ77",
-                telegram_id=9,
-                chat_id=9,
-                driver_name="Иванов Иван Иванович",
-            )
-        self.assertEqual(str(same_name.exception), DAY_TAKEN)
-        with self.assertRaises(BookingError):
+        self.assertTrue(
+            pair_booked_on(ENGINE, TOMORROW, "А100АА77", "Иванов Иван Иванович")
+        )
+        with self.assertRaises(BookingError) as same_pair:
+            self._book(TOMORROW, 9)
+        self.assertEqual(str(same_pair.exception), DAY_TAKEN)
+        with self.assertRaises(BookingError) as same_chat:
             self._book(
                 TOMORROW,
                 9,
                 plate="В200ВВ77",
                 telegram_id=1,
                 chat_id=1,
-                driver_name="Сидоров Сидор Сидорович",
+                driver_name="Петров Петр Петрович",
             )
+        self.assertEqual(str(same_chat.exception), DAY_TAKEN)
+        with self.assertRaises(BookingError) as unknown:
+            self._book(
+                TOMORROW,
+                9,
+                plate="К456КК150",
+                telegram_id=9,
+                chat_id=9,
+                driver_name="Петров Петр Петрович",
+            )
+        self.assertEqual(str(unknown.exception), NOT_LISTED)
         cancel_booking(ENGINE, telegram_id=1, chat_id=1, booking_id=first.id, now=NOW)
         again = self._book(TOMORROW, 9, plate="А100АА77")
         self.assertNotEqual(again.id, first.id)
@@ -215,6 +215,10 @@ class BookingTests(unittest.TestCase):
                 clean_weight_tons(bad_weight)
             self.assertIn("1 до 40", str(weight.exception))
         self.assertEqual(clean_weight_tons("6 т"), 6000)
+        with self.assertRaises(FieldError) as light_weight:
+            clean_weight_tons("6", vehicle="light")
+        self.assertIn("1 до 5", str(light_weight.exception))
+        self.assertEqual(clean_weight_tons("3", vehicle="light"), 3000)
 
     def test_occupied_window_hides_until_cancel_and_two_confirms_stay_one(self) -> None:
         from dockbot.present import card_text
@@ -224,7 +228,7 @@ class BookingTests(unittest.TestCase):
             ENGINE,
             gate_id=self.gate_a,
             slot_start=start,
-            plate="А123ВС178",
+            plate="А100АА77",
             make="КАМАЗ",
             driver_name="Иванов Иван Иванович",
             cargo_type="Паллеты",
@@ -258,7 +262,7 @@ class BookingTests(unittest.TestCase):
             ENGINE,
             gate_id=self.gate_a,
             slot_start=start,
-            plate="А123ВС178",
+            plate="А100АА77",
             make="КАМАЗ",
             driver_name="Иванов Иван Иванович",
             cargo_type="Паллеты",
@@ -271,7 +275,7 @@ class BookingTests(unittest.TestCase):
             ENGINE,
             gate_id=self.gate_a,
             slot_start=start,
-            plate="А123ВС178",
+            plate="А100АА77",
             make="КАМАЗ",
             driver_name="Иванов Иван Иванович",
             cargo_type="Паллеты",
@@ -286,7 +290,7 @@ class BookingTests(unittest.TestCase):
                 ENGINE,
                 gate_id=self.gate_a,
                 slot_start=start,
-                plate="В777ВВ77",
+                plate="В200ВВ77",
                 make="ГАЗ",
                 driver_name="Петров Петр Петрович",
                 cargo_type="Паллеты",
@@ -333,7 +337,7 @@ class BookingTests(unittest.TestCase):
             ENGINE,
             gate_id=self.gate_a,
             slot_start=slot.start,
-            plate="А001АА77",
+            plate="А100АА77",
             make="Volvo",
             driver_name="Иванов Иван Иванович",
             cargo_type="паллеты",
@@ -345,7 +349,7 @@ class BookingTests(unittest.TestCase):
             ENGINE,
             gate_id=self.gate_a,
             slot_start=slot.start,
-            plate="А001АА77",
+            plate="А100АА77",
             make="Volvo",
             driver_name="Иванов Иван Иванович",
             cargo_type="паллеты",
@@ -368,7 +372,7 @@ class BookingTests(unittest.TestCase):
                     ENGINE,
                     gate_id=self.gate_a,
                     slot_start=slot.start,
-                    plate="А011АА77" if telegram_id == 11 else "А012АА77",
+                    plate="А100АА77" if telegram_id == 11 else "В200ВВ77",
                     make="Volvo",
                     driver_name=(
                         "Иванов Иван Иванович"
@@ -406,7 +410,7 @@ class BookingTests(unittest.TestCase):
                 ENGINE,
                 gate_id=gate_id,
                 slot_start=slot.start,
-                plate="В021ВВ77" if telegram_id == 21 else "В022ВВ77",
+                plate="С300СС77" if telegram_id == 21 else "В022ВВ77",
                 make="MAN",
                 driver_name=(
                     "Сидоров Сидор Сидорович"
@@ -572,6 +576,86 @@ class BookingTests(unittest.TestCase):
         second = qr_png("beta-token")
         self.assertTrue(first.startswith(b"\x89PNG"))
         self.assertNotEqual(first, second)
+
+    def test_roster_is_ten_drivers_and_light_truck_is_shorter(self) -> None:
+        from dockbot.booking import (
+            known_driver_rows,
+            offered_cargos,
+            unload_minutes,
+        )
+        from dockbot.present import card_text
+        from dockbot.roster import NOT_LISTED, STAND_DRIVERS
+
+        rows = known_driver_rows(ENGINE)
+        self.assertEqual(len(rows), 10)
+        self.assertEqual(len(STAND_DRIVERS), 10)
+        self.assertEqual(set(rows), set(STAND_DRIVERS))
+        heavy = unload_minutes(60, 6000, 5000)
+        light = unload_minutes(60, 6000, 5000, "light")
+        self.assertEqual(heavy, 75)
+        self.assertLess(light, heavy)
+        light_cargo = [label for _code, label, _minutes in offered_cargos(ENGINE, "light")]
+        heavy_cargo = [label for _code, label, _minutes in offered_cargos(ENGINE, "heavy")]
+        self.assertIn("Коробки", light_cargo)
+        self.assertNotIn("Паллеты", light_cargo)
+        self.assertIn("Паллеты", heavy_cargo)
+        self.assertNotIn("Коробки", heavy_cargo)
+        boxes = next(
+            minutes
+            for _code, label, minutes in offered_cargos(ENGINE, "light")
+            if label == "Коробки"
+        )
+        self.assertLess(boxes, 30)
+        start = self._slot(TOMORROW, self.gate_a, 8).start
+        trip = create_booking(
+            ENGINE,
+            gate_id=self.gate_a,
+            slot_start=start,
+            plate="А100АА77",
+            make="ГАЗ",
+            driver_name="Иванов Иван Иванович",
+            cargo_type="Паллеты",
+            telegram_id=1,
+            chat_id=1,
+            now=NOW,
+            vehicle="light",
+            weight_kg=1000,
+        )
+        self.assertEqual(trip.vehicle_kind, "light")
+        self.assertLess(trip.slot_end - trip.slot_start, timedelta(minutes=60))
+        card = card_text(trip, ZONE, None)
+        self.assertIn("Транспорт: малотоннажный", card)
+        self.assertIn("малотоннажный минус", card)
+        self.assertIn("потолок 120", card)
+        with self.assertRaises(FieldError):
+            create_booking(
+                ENGINE,
+                gate_id=self.gate_a,
+                slot_start=self._slot(TOMORROW, self.gate_a, 10).start,
+                plate="В200ВВ77",
+                make="ГАЗ",
+                driver_name="Петров Петр Петрович",
+                cargo_type="Паллеты",
+                telegram_id=2,
+                chat_id=2,
+                now=NOW,
+                vehicle="light",
+                weight_kg=6000,
+            )
+        with self.assertRaises(BookingError) as missing:
+            create_booking(
+                ENGINE,
+                gate_id=self.gate_b,
+                slot_start=self._slot(TOMORROW, self.gate_b, 8).start,
+                plate="А100АА77",
+                make="ГАЗ",
+                driver_name="Петров Петр Петрович",
+                cargo_type="Паллеты",
+                telegram_id=3,
+                chat_id=3,
+                now=NOW,
+            )
+        self.assertEqual(str(missing.exception), NOT_LISTED)
 
     def _book(
         self,

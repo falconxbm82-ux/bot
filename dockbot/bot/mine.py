@@ -13,6 +13,10 @@ from aiogram.types import BufferedInputFile, CallbackQuery, Message
 from sqlalchemy.engine import Engine
 
 from dockbot.booking import (
+    DAY_TAKEN,
+    HEAVY_CARGOS,
+    LIGHT_CARGOS,
+    NOT_LISTED,
     BookingError,
     BookingNotFound,
     FieldError,
@@ -26,16 +30,20 @@ from dockbot.booking import (
     clean_cargo,
     clean_driver_name,
     clean_make,
+    driver_known,
     get_owned,
     normalize_plate,
     list_live,
     load_location,
     load_zone,
+    offered_cargos,
+    pair_booked_on,
     queue_note,
     update_vehicle,
 )
 from dockbot.bot.driver import MY_BOOKINGS, driver_menu
 from dockbot.bot.ui import (
+    CARGO_LABELS,
     CARGO_PREFIX,
     CANCEL_NO_PREFIX,
     CANCEL_PREFIX,
@@ -63,13 +71,6 @@ from dockbot.present import card_text, local_parts, pass_caption
 
 log = logging.getLogger(__name__)
 router = Router(name="mine")
-
-_CARGO_LABELS = {
-    "pallets": "Паллеты",
-    "bulk": "Навал",
-    "liquid": "Жидкость",
-    "reefer": "Рефрижератор",
-}
 
 
 class DocFlow(StatesGroup):
@@ -534,26 +535,63 @@ async def party_make(message: Message, state: FSMContext) -> None:
 
 
 @router.message(PartyFlow.driver_name, F.text)
-async def party_name(message: Message, state: FSMContext) -> None:
+async def party_name(message: Message, state: FSMContext, engine: Engine) -> None:
     try:
         field = clean_driver_name(message.text or "")
     except FieldError as exc:
         await message.answer(str(exc))
         return
-    await state.update_data(driver_name=field.value)
+    ids = actor_ids(message)
+    data = await state.get_data()
+    if ids is None or not data.get("booking_id"):
+        await message.answer("Замена устарела. Откройте «Мои брони».")
+        return
+    plate = data.get("plate") or ""
+    try:
+        trip = await asyncio.to_thread(get_owned, engine, ids[0], ids[1], int(data["booking_id"]))
+        known = await asyncio.to_thread(driver_known, engine, plate, field.value)
+        zone = await asyncio.to_thread(load_zone, engine)
+        taken = await asyncio.to_thread(
+            pair_booked_on,
+            engine,
+            trip.slot_start.astimezone(zone).date(),
+            plate,
+            field.value,
+            ignore_booking_id=trip.id,
+        )
+    except FieldError as exc:
+        await message.answer(str(exc))
+        return
+    except BookingError as exc:
+        await message.answer(str(exc))
+        return
+    if not known:
+        await message.answer(NOT_LISTED)
+        return
+    if taken:
+        await message.answer(DAY_TAKEN)
+        return
+    await state.update_data(driver_name=field.value, vehicle=trip.vehicle_kind)
+    rows = await asyncio.to_thread(offered_cargos, engine, trip.vehicle_kind)
+    minutes = {code: shown for code, _label, shown in rows}
     await state.set_state(PartyFlow.cargo)
-    await message.answer("Тип груза.", reply_markup=cargo_markup())
+    await message.answer(
+        "Тип груза.", reply_markup=cargo_markup(minutes, trip.vehicle_kind)
+    )
 
 
 @router.callback_query(PartyFlow.cargo, F.data.startswith(CARGO_PREFIX))
 async def party_cargo(query: CallbackQuery, state: FSMContext, engine: Engine) -> None:
     code = (query.data or "").removeprefix(CARGO_PREFIX)
-    if code == "other":
+    data = await state.get_data()
+    if code == "other" and data.get("vehicle") != "light":
         await state.set_state(PartyFlow.cargo_note)
         await reply(query, "Напишите тип груза.", cancel_step_markup())
         return
-    label = _CARGO_LABELS.get(code)
-    if label is None:
+    vehicle = data.get("vehicle") or "heavy"
+    allowed = LIGHT_CARGOS if vehicle == "light" else HEAVY_CARGOS
+    label = CARGO_LABELS.get(code)
+    if label is None or code not in {item[0] for item in allowed}:
         await query.answer("Кнопка устарела", show_alert=True)
         return
     await _save_party(query, state, engine, label)

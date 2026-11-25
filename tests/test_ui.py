@@ -19,6 +19,7 @@ from dockbot.bot.ui import (
     summary_markup,
     trips_markup,
     vehicle_markup,
+    weight_markup,
 )
 from dockbot.models import BookingStatus, StaffRole
 from dockbot.present import day_button, trip_button
@@ -79,7 +80,10 @@ class ScreenTests(unittest.TestCase):
             back_menu_markup(),
             cancel_step_markup(),
             vehicle_markup(),
+            weight_markup(),
+            weight_markup("light"),
             cargo_markup({"pallets": 60}),
+            cargo_markup({"boxes": 20}, "light"),
             dates_markup([date(2026, 11, 9)]),
             gates_markup([GateChoice(1, "2", "Ворота 2")]),
             slots_markup([slot], ZONE, start),
@@ -101,6 +105,15 @@ class ScreenTests(unittest.TestCase):
         self.assertIn("В меню", labels)
         self.assertIn("Изменить данные", labels)
         self.assertIn("Паллеты 60 мин", labels)
+        self.assertIn("Коробки 20 мин", labels)
+        self.assertIn("1 т", labels)
+        self.assertIn("3 т", labels)
+        self.assertNotIn("Срочный", labels)
+        self.assertNotIn("30 т", [
+            button.text
+            for row in weight_markup("light").inline_keyboard
+            for button in row
+        ])
         self.assertIn("Назад", labels)
 
     def test_shift_filters_and_reminder_copy(self) -> None:

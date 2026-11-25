@@ -13,7 +13,7 @@ from aiogram.types import (
     ReplyKeyboardMarkup,
 )
 
-from dockbot.booking import GateChoice, SlotChoice, Trip
+from dockbot.booking import HEAVY_CARGOS, LIGHT_CARGOS, GateChoice, SlotChoice, Trip
 from dockbot.bot.keyboard import CALLBACK_BOOK, CALLBACK_LIST, NAV_MENU
 from dockbot.models import BookingStatus
 from dockbot.present import day_button, trip_button
@@ -49,13 +49,7 @@ _PASS_STATUSES = {
     BookingStatus.confirmed,
     BookingStatus.arrived,
 }
-_CARGOS = (
-    ("pallets", "Паллеты"),
-    ("bulk", "Навал"),
-    ("liquid", "Жидкость"),
-    ("reefer", "Рефрижератор"),
-    ("other", "Другое"),
-)
+CARGO_LABELS = dict(HEAVY_CARGOS + LIGHT_CARGOS)
 
 
 def actor_ids(event: Message | CallbackQuery) -> tuple[int, int] | None:
@@ -192,23 +186,11 @@ def vehicle_markup() -> InlineKeyboardMarkup:
     )
 
 
-def urgent_markup() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="Срочный", callback_data="bk:urgent:1")],
-            [InlineKeyboardButton(text="Обычный", callback_data="bk:urgent:0")],
-            _step_row(),
-        ]
-    )
-
-
-_WEIGHT_TONS = (1, 5, 10, 15, 20, 30)
-
-
-def weight_markup() -> InlineKeyboardMarkup:
+def weight_markup(vehicle: str = "heavy") -> InlineKeyboardMarkup:
+    tons_list = (1, 2, 3) if vehicle == "light" else (1, 5, 10, 15, 20, 30)
     rows: list[list[InlineKeyboardButton]] = []
     row: list[InlineKeyboardButton] = []
-    for tons in _WEIGHT_TONS:
+    for tons in tons_list:
         row.append(
             InlineKeyboardButton(
                 text=f"{tons} т",
@@ -256,9 +238,12 @@ def document_markup() -> InlineKeyboardMarkup:
     )
 
 
-def cargo_markup(minutes: dict[str, int] | None = None) -> InlineKeyboardMarkup:
+def cargo_markup(
+    minutes: dict[str, int] | None = None, vehicle: str = "heavy"
+) -> InlineKeyboardMarkup:
     rows = []
-    for code, label in _CARGOS:
+    source = LIGHT_CARGOS if vehicle == "light" else HEAVY_CARGOS
+    for code, label in source:
         title = label
         if minutes and code in minutes:
             title = f"{label} {minutes[code]} мин"
