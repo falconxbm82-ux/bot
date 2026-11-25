@@ -16,7 +16,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
 from dockbot.access import AccessDenied, require_role, require_staff
-from dockbot.booking import Trip, _changed, _trip
+from dockbot.booking import Trip, _changed, _trip, slot_has_passed
 from dockbot.models import (
     TERMINAL_STATUSES,
     Booking,
@@ -56,6 +56,10 @@ class PassNotFound(Exception):
     """Токен или PIN пропуска не найден. Статус не менялся."""
 
 
+class PassExpired(Exception):
+    """Дата и время слота уже прошли. Пропуск не действующий."""
+
+
 class TransitionRejected(Exception):
     """Переход статусу не положен. Строка не менялась."""
 
@@ -64,13 +68,18 @@ def allowed_next(status: BookingStatus) -> BookingStatus | None:
     return NEXT.get(status)
 
 
-def read_pass_image(engine: Engine, telegram_id: int, image: bytes) -> Trip | None:
+def read_pass_image(
+    engine: Engine,
+    telegram_id: int,
+    image: bytes,
+    now: datetime | None = None,
+) -> Trip | None:
     """Карточка по фото. Нечитаемый кадр возвращает None и ничего не пишет."""
     require_role(engine, telegram_id, StaffRole.security)
     token = decode_qr(image)
     if not token:
         return None
-    return find_pass(engine, telegram_id, token=token)
+    return find_pass(engine, telegram_id, token=token, now=now)
 
 
 def find_pass(
@@ -79,15 +88,23 @@ def find_pass(
     *,
     token: str | None = None,
     pin: str | None = None,
+    now: datetime | None = None,
 ) -> Trip:
-    """Активный пропуск, иначе последняя архивная запись с тем же PIN."""
+    """Активный пропуск, иначе последняя архивная запись с тем же PIN.
+
+    Если дата и время слота уже прошли, пропуск недействителен.
+    """
     require_role(engine, telegram_id, StaffRole.security)
     with Session(engine) as session:
         booking = _lookup(session, token=token, pin=pin)
         if booking is None:
             log.info("pass not found")
             raise PassNotFound()
-        return _trip(session, booking)
+        trip = _trip(session, booking)
+    if slot_has_passed(trip.slot_end, now):
+        log.info("pass expired booking=%s", trip.id)
+        raise PassExpired()
+    return trip
 
 
 def load_trip(engine: Engine, telegram_id: int, booking_id: int) -> Trip | None:
@@ -123,6 +140,8 @@ def apply_mark(
             if booking is None:
                 log.info("pass not found")
                 raise PassNotFound()
+            if target is BookingStatus.arrived and slot_has_passed(booking.slot_end, moment):
+                raise PassExpired()
             if NEXT.get(booking.status) != target:
                 raise TransitionRejected()
             if target is BookingStatus.unloading and gate_id is not None:

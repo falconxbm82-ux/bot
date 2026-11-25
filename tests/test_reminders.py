@@ -514,5 +514,29 @@ def _slot(day, hour: int, gate_id: int, now: datetime) -> datetime:
     raise AssertionError(hour)
 
 
+class ReminderMapTests(unittest.IsolatedAsyncioTestCase):
+    async def test_reminder_does_not_send_a_map(self) -> None:
+        import asyncio
+
+        from dockbot.scheduler import TelegramSender
+
+        class _Bot:
+            def __init__(self) -> None:
+                self.messages: list[tuple[int, str]] = []
+                self.locations: list[object] = []
+
+            async def send_message(self, chat_id: int, text: str) -> None:
+                self.messages.append((chat_id, text))
+
+            async def send_location(self, **kwargs: object) -> None:
+                self.locations.append(kwargs)
+
+        bot = _Bot()
+        outbound = TelegramSender(bot, asyncio.get_running_loop())
+        await outbound._reminder(7, 55.75, 37.62, "Напоминание: разгрузка")
+        self.assertEqual(bot.messages, [(7, "Напоминание: разгрузка")])
+        self.assertEqual(bot.locations, [])
+
+
 if __name__ == "__main__":
     unittest.main()

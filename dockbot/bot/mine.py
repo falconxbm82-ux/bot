@@ -34,8 +34,8 @@ from dockbot.booking import (
     get_owned,
     normalize_plate,
     list_live,
-    load_location,
     load_zone,
+    slot_has_passed,
     offered_cargos,
     pair_booked_on,
     queue_note,
@@ -57,7 +57,6 @@ from dockbot.bot.ui import (
     PASS_PREFIX,
     actor_ids,
     cancel_markup,
-    GEO,
     PARTY_PREFIX,
     card_markup,
     cargo_markup,
@@ -67,7 +66,7 @@ from dockbot.bot.ui import (
 )
 from dockbot.bot.wizard import begin_move
 from dockbot.passes import qr_png
-from dockbot.present import card_text, local_parts, pass_caption
+from dockbot.present import PASS_EXPIRED, card_text, local_parts, pass_caption
 
 log = logging.getLogger(__name__)
 router = Router(name="mine")
@@ -100,7 +99,6 @@ async def show_my_pass(message: Message, engine: Engine) -> None:
         return
     try:
         trips = await asyncio.to_thread(list_live, engine, user.id, message.chat.id)
-        zone = await asyncio.to_thread(load_zone, engine)
     except SiteNotConfigured as exc:
         await message.answer(str(exc))
         return
@@ -109,6 +107,15 @@ async def show_my_pass(message: Message, engine: Engine) -> None:
             "Активных броней нет. Нажмите «Записаться».",
             reply_markup=empty_bookings_markup(),
         )
+        return
+    trips = [trip for trip in trips if not slot_has_passed(trip.slot_end)]
+    if not trips:
+        await message.answer(PASS_EXPIRED, reply_markup=driver_menu())
+        return
+    try:
+        zone = await asyncio.to_thread(load_zone, engine)
+    except SiteNotConfigured as exc:
+        await message.answer(str(exc))
         return
     if len(trips) == 1:
         trip = trips[0]
@@ -119,19 +126,6 @@ async def show_my_pass(message: Message, engine: Engine) -> None:
         )
         return
     await message.answer("Выберите бронь.", reply_markup=trips_markup(trips, zone, 0))
-
-
-async def show_directions(message: Message, engine: Engine) -> None:
-    point = await asyncio.to_thread(load_location, engine)
-    if point is None:
-        await message.answer(
-            "Геометка склада не задана. Запишитесь кнопкой «Записаться» — "
-            "пропуск придёт в этот чат.",
-            reply_markup=empty_bookings_markup(),
-        )
-        return
-    await message.answer("Склад. Точка на карте ниже. Пропуск — в «Мой пропуск».")
-    await message.answer_location(latitude=point[0], longitude=point[1])
 
 
 async def show_cancel_choices(message: Message, engine: Engine) -> None:
@@ -215,21 +209,6 @@ async def open_card(query: CallbackQuery, engine: Engine) -> None:
     await _show_card(query, engine, booking_id)
 
 
-@router.callback_query(F.data == GEO)
-async def show_geo(query: CallbackQuery, engine: Engine) -> None:
-    message = query.message
-    await query.answer()
-    if message is None or not hasattr(message, "answer"):
-        return
-    point = await asyncio.to_thread(load_location, engine)
-    if point is None:
-        await message.answer(
-            "Геометка склада не задана. Пропуск остаётся в этом чате."
-        )
-        return
-    await message.answer_location(latitude=point[0], longitude=point[1])
-
-
 @router.callback_query(F.data.startswith(PASS_PREFIX))
 async def show_pass(query: CallbackQuery, engine: Engine) -> None:
     booking_id = _id(query.data, PASS_PREFIX)
@@ -239,10 +218,17 @@ async def show_pass(query: CallbackQuery, engine: Engine) -> None:
         return
     try:
         trip = await asyncio.to_thread(get_owned, engine, ids[0], ids[1], booking_id)
-        zone = await asyncio.to_thread(load_zone, engine)
     except BookingNotFound as exc:
         await query.answer(str(exc), show_alert=True)
         return
+    if slot_has_passed(trip.slot_end):
+        await query.answer(PASS_EXPIRED, show_alert=True)
+        message = query.message
+        if message is not None and hasattr(message, "answer"):
+            await message.answer(PASS_EXPIRED)
+        return
+    try:
+        zone = await asyncio.to_thread(load_zone, engine)
     except SiteNotConfigured as exc:
         await reply(query, str(exc), driver_menu())
         return
@@ -519,7 +505,7 @@ async def party_plate(message: Message, state: FSMContext) -> None:
         return
     await state.update_data(plate=plate)
     await state.set_state(PartyFlow.make)
-    await message.answer("Марка.", reply_markup=cancel_step_markup())
+    await message.answer("Марка машины.", reply_markup=cancel_step_markup())
 
 
 @router.message(PartyFlow.make, F.text)

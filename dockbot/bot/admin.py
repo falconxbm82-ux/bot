@@ -12,9 +12,7 @@ from aiogram.types import (
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
-    KeyboardButton,
     Message,
-    ReplyKeyboardMarkup,
 )
 from sqlalchemy.engine import Engine
 
@@ -42,7 +40,6 @@ from dockbot.adminboard import (
     set_cancel_minutes,
     set_cargo_minutes,
     set_late_minutes,
-    set_point,
     set_slot_closed,
     set_weight_step,
     toggle_gate,
@@ -76,7 +73,6 @@ class AdminFlow(StatesGroup):
     staff_name = State()
     staff_telegram = State()
     address = State()
-    point = State()
 
 
 def _user_id(event: Message | CallbackQuery) -> int | None:
@@ -191,9 +187,9 @@ async def flip_gate(query: CallbackQuery, engine: Engine) -> None:
     except AdminError as exc:
         await query.answer(str(exc), show_alert=True)
         return
-    state_text = "вкл" if gate.is_active else "выкл"
+    state_text = "включены" if gate.is_active else "выключены"
     gates = await asyncio.to_thread(list_gates, engine, user_id)
-    await _answer(query, f"Ворота {gate.code} · {state_text}.", _gates_markup(gates))
+    await _answer(query, f"Ворота {gate.code} {state_text}.", _gates_markup(gates))
 
 
 @router.callback_query(F.data.startswith("ad:gate-light:"))
@@ -241,7 +237,7 @@ async def show_norms(query: CallbackQuery, engine: Engine) -> None:
         rows.append(
             [
                 InlineKeyboardButton(
-                    text=f"{label} {choice}",
+                    text=f"{label} {choice} мин",
                     callback_data=f"ad:norm:{code}:{choice}",
                 )
                 for choice in NORM_CHOICES[2:]
@@ -249,7 +245,7 @@ async def show_norms(query: CallbackQuery, engine: Engine) -> None:
         )
     step_row = [
         InlineKeyboardButton(
-            text=f"шаг {choice // 1000} т",
+            text=f"Шаг {choice // 1000} т",
             callback_data=f"ad:weight-step:{choice}",
         )
         for choice in WEIGHT_STEP_CHOICES
@@ -466,7 +462,7 @@ async def save_staff(message: Message, state: FSMContext, engine: Engine) -> Non
     await state.clear()
     bound = "привязан" if row.telegram_id else "не привязан"
     await message.answer(
-        f"{ROLE_LABEL[row.role]} · {row.display_name} · {bound}\n"
+        f"{ROLE_LABEL[row.role]}, {row.display_name}, {bound}.\n"
         f"PIN один раз: {pin}\n"
         "Сохраните его. Повторно бот его не покажет.",
         reply_markup=keyboard_for(StaffRole.admin),
@@ -503,7 +499,7 @@ async def staff_card(query: CallbackQuery, engine: Engine) -> None:
     )
     await _answer(
         query,
-        f"{ROLE_LABEL[person.role]} · {person.display_name} · {bound}\n{active}",
+        f"{ROLE_LABEL[person.role]}, {person.display_name}, {bound}.\n{active}",
         markup,
     )
 
@@ -591,44 +587,6 @@ async def save_address(message: Message, state: FSMContext, engine: Engine) -> N
     await message.answer("Адрес сохранён.", reply_markup=keyboard_for(StaffRole.admin))
 
 
-@router.callback_query(F.data == "ad:point")
-async def ask_point(query: CallbackQuery, state: FSMContext, engine: Engine) -> None:
-    if not await _admin(query, engine):
-        return
-    await state.set_state(AdminFlow.point)
-    markup = ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text="Отправить геопозицию", request_location=True)]],
-        resize_keyboard=True,
-    )
-    await _answer(query, "Отправьте геопозицию склада один раз.")
-    message = query.message
-    if message is not None and hasattr(message, "answer"):
-        await message.answer("Кнопка ниже запросит точку.", reply_markup=markup)
-
-
-@router.message(AdminFlow.point, F.location)
-async def save_point(message: Message, state: FSMContext, engine: Engine) -> None:
-    user_id = _user_id(message)
-    location = message.location
-    if user_id is None or location is None:
-        return
-    try:
-        await asyncio.to_thread(
-            set_point, engine, user_id, location.latitude, location.longitude
-        )
-    except AccessDenied:
-        await state.clear()
-        await message.answer(RIGHTS, reply_markup=keyboard_for(None))
-        return
-    except AdminError as exc:
-        await message.answer(str(exc))
-        return
-    await state.clear()
-    await message.answer(
-        "Точка склада сохранена.", reply_markup=keyboard_for(StaffRole.admin)
-    )
-
-
 @router.callback_query(F.data == "ad:day")
 async def day_again(query: CallbackQuery, engine: Engine) -> None:
     await _show_day(query, engine)
@@ -641,7 +599,7 @@ def _gates_markup(gates: list) -> InlineKeyboardMarkup:
         rows.append(
             [
                 InlineKeyboardButton(
-                    text=f"Ворота {gate.code} {'вкл' if gate.is_active else 'выкл'}",
+                    text=f"Ворота {gate.code} {'включены' if gate.is_active else 'выключены'}",
                     callback_data=f"ad:gate-toggle:{gate.id}",
                 )
             ]
@@ -820,9 +778,6 @@ async def _show_settings(event: Message | CallbackQuery, engine: Engine) -> None
     except AdminError as exc:
         await _tell(event, str(exc))
         return
-    point = "не задана"
-    if current.latitude is not None and current.longitude is not None:
-        point = f"{current.latitude:.5f}, {current.longitude:.5f}"
     address = current.address or "не задан"
     text = (
         f"Окно отмены: {current.cancel_minutes} мин\n"
@@ -830,8 +785,7 @@ async def _show_settings(event: Message | CallbackQuery, engine: Engine) -> None
         f"Зазор между машинами: {current.buffer_minutes} мин\n"
         f"Шаг веса: {current.weight_step_kg // 1000} т\n"
         f"Адрес: {address}\n"
-        f"Точка: {point}\n"
-        "Напоминания 24 ч, 2 ч и 30 мин не меняются кнопками."
+        "Напоминания за 24 ч, за 2 ч и за 30 мин этими кнопками не меняются."
     )
     rows = [
         [
@@ -843,20 +797,19 @@ async def _show_settings(event: Message | CallbackQuery, engine: Engine) -> None
             for minutes in CANCEL_CHOICES[2:]
         ],
         [
-            InlineKeyboardButton(text=f"опоздание {minutes}", callback_data=f"ad:late:{minutes}")
+            InlineKeyboardButton(text=f"Опоздание {minutes} мин", callback_data=f"ad:late:{minutes}")
             for minutes in LATE_CHOICES[:2]
         ],
         [
-            InlineKeyboardButton(text=f"опоздание {minutes}", callback_data=f"ad:late:{minutes}")
+            InlineKeyboardButton(text=f"Опоздание {minutes} мин", callback_data=f"ad:late:{minutes}")
             for minutes in LATE_CHOICES[2:]
         ],
         [
-            InlineKeyboardButton(text=f"зазор {minutes}", callback_data=f"ad:buffer:{minutes}")
+            InlineKeyboardButton(text=f"Зазор {minutes} мин", callback_data=f"ad:buffer:{minutes}")
             for minutes in BUFFER_CHOICES
         ],
         [InlineKeyboardButton(text="Нормативы груза", callback_data="ad:norms")],
         [InlineKeyboardButton(text="Изменить данные", callback_data="ad:address")],
-        [InlineKeyboardButton(text="Отправить геопозицию", callback_data="ad:point")],
         [InlineKeyboardButton(text="В меню", callback_data=MENU)],
     ]
     await _tell(event, text, InlineKeyboardMarkup(inline_keyboard=rows))

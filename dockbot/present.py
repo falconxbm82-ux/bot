@@ -8,6 +8,8 @@ from zoneinfo import ZoneInfo
 from dockbot.booking import DURATION_CAP_MINUTES, Trip
 from dockbot.models import BookingStatus
 
+PASS_EXPIRED = "Время слота прошло. Пропуск недействителен."
+
 STATUS_LABELS: dict[BookingStatus, str] = {
     BookingStatus.booked: "Забронировано",
     BookingStatus.confirmed: "Подтверждено",

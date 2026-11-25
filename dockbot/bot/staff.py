@@ -41,9 +41,11 @@ from dockbot.booking import (
     clean_driver_name,
     clean_make,
     normalize_plate,
+    slot_has_passed,
     staff_update_party,
 )
 from dockbot.checkpoint import (
+    PassExpired,
     PassNotFound,
     TransitionRejected,
     apply_mark,
@@ -55,7 +57,7 @@ from dockbot.checkpoint import (
 )
 from dockbot.documents import document_path
 from dockbot.models import BookingStatus, StaffRole
-from dockbot.present import card_text
+from dockbot.present import PASS_EXPIRED, card_text
 from dockbot.shiftboard import (
     ShiftPage,
     actions_for,
@@ -79,7 +81,7 @@ OPEN_PREFIX = "sh:open:"
 
 DENIED = "Доступ не предоставлен."
 PIN_BAD = "Неверный PIN."
-PIN_LOCKED = "Вход сотрудника заблокирован до /start."
+PIN_LOCKED = "Вход сотрудника заблокирован. Отправьте /start."
 RIGHTS = "Недостаточно прав."
 PIN_PROMPT = "Введите PIN сотрудника: 4 цифры."
 PASS_PROMPT = "Пришлите фото QR-пропуска."
@@ -251,6 +253,9 @@ async def pass_photo(message: Message, state: FSMContext, engine: Engine) -> Non
     except PassNotFound:
         await message.answer(NOT_FOUND)
         return
+    except PassExpired:
+        await message.answer(PASS_EXPIRED)
+        return
     if trip is None:
         log.info("pass qr was not recognized")
         await message.answer(UNREADABLE, reply_markup=_scan_fallback())
@@ -282,6 +287,9 @@ async def pass_pin(message: Message, state: FSMContext, engine: Engine) -> None:
             "Пропуск не найден. Проверьте цифры или пришлите фото QR ещё раз.",
             reply_markup=_scan_fallback(),
         )
+        return
+    except PassExpired:
+        await message.answer(PASS_EXPIRED)
         return
     await _show_checkpoint(message, engine, trip)
 
@@ -345,7 +353,7 @@ async def staff_edit_plate(message: Message, state: FSMContext) -> None:
         return
     await state.update_data(staff_plate=plate)
     await state.set_state(StaffFlow.edit_make)
-    await message.answer("Марка.")
+    await message.answer("Марка машины.")
 
 
 @router.message(StaffFlow.edit_make, F.text)
@@ -455,6 +463,9 @@ async def _mark(
     except PassNotFound:
         await _reply(query, NOT_FOUND)
         return
+    except PassExpired:
+        await _reply(query, PASS_EXPIRED)
+        return
     except TransitionRejected:
         trip = await _current(engine, user.id, booking_id)
         if trip is None:
@@ -555,7 +566,11 @@ def _markup(engine: Engine, trip: Trip, role: StaffRole) -> InlineKeyboardMarkup
         [InlineKeyboardButton(text=action.label, callback_data=action.callback)]
         for action in actions
     ]
-    if trip.no_driver_chat and role in {StaffRole.security, StaffRole.admin}:
+    if (
+        trip.no_driver_chat
+        and role in {StaffRole.security, StaffRole.admin}
+        and not slot_has_passed(trip.slot_end)
+    ):
         rows.insert(
             0,
             [
@@ -713,7 +728,7 @@ async def open_shift(
     try:
         zone, day, trips = await asyncio.to_thread(load_shift, engine, user.id)
     except AccessDenied:
-        await message.answer(RIGHTS + " Сначала откройте роль «Охрана» или «Кладовщик».")
+        await message.answer(RIGHTS + " Сначала войдите как охрана или кладовщик.")
         return
     except SiteNotConfigured:
         await message.answer("Склад не настроен. Обратитесь к администратору стенда.")
@@ -864,6 +879,9 @@ async def show_desk_pass(query: CallbackQuery, state: FSMContext, engine: Engine
     if trip is None or not trip.no_driver_chat:
         await _reply(query, NOT_FOUND)
         return
+    if slot_has_passed(trip.slot_end):
+        await _reply(query, PASS_EXPIRED)
+        return
     from aiogram.types import BufferedInputFile
 
     from dockbot.booking import load_zone
@@ -887,7 +905,7 @@ async def _send_document(message: Message, trip: Trip, role: StaffRole) -> None:
     path = document_path(trip.doc_name)
     if path is None or not path.is_file() or path.stat().st_size == 0:
         if hasattr(message, "answer"):
-            await message.answer("Фото документа не найдено. Результат сверки — в тексте карточки.")
+            await message.answer("Фото документа не найдено. Результат сверки есть в тексте карточки.")
         return
     if not hasattr(message, "answer_photo"):
         return

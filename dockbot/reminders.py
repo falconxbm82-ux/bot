@@ -96,12 +96,12 @@ def reminder_text(
     del plate
     if kind is NotificationKind.h24:
         return (
-            f"Напоминание: разгрузка {date_text} {clock} мск, "
+            f"Напоминание: разгрузка {date_text}, {clock} мск, "
             f"ворота {gate_code}. Пропуск в боте."
         )
     if kind is NotificationKind.h2:
         return (
-            f"Через 2 часа. Разгрузка {date_text} {clock} мск, "
+            f"Через 2 часа разгрузка {date_text}, {clock} мск, "
             f"ворота {gate_code}. Пропуск в боте."
         )
     return f"Через 30 минут разгрузка, ворота {gate_code}."

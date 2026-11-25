@@ -3,10 +3,17 @@
 from __future__ import annotations
 
 import unittest
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
-from dockbot.booking import FieldError, GateChoice, SlotChoice, Trip, normalize_plate
+from dockbot.booking import (
+    FieldError,
+    GateChoice,
+    SlotChoice,
+    Trip,
+    normalize_plate,
+    slot_has_passed,
+)
 from dockbot.bot.keyboard import button_labels, keyboard_for
 from dockbot.bot.ui import (
     back_menu_markup,
@@ -15,6 +22,7 @@ from dockbot.bot.ui import (
     cargo_markup,
     dates_markup,
     gates_markup,
+    pass_done_markup,
     slots_markup,
     summary_markup,
     trips_markup,
@@ -54,8 +62,17 @@ def _trip(status: BookingStatus, hour: int) -> Trip:
 class ScreenTests(unittest.TestCase):
     def test_keyboards_have_no_role_row(self) -> None:
         driver = button_labels(keyboard_for(None))
-        self.assertEqual(driver[-2:], ["Я сотрудник", "Помощь"])
+        self.assertEqual(driver[-1], "Помощь")
+        self.assertIn("Мой пропуск", driver)
+        self.assertNotIn("Как проехать", driver)
         self.assertNotIn("Охрана", driver)
+        done = [
+            button.text
+            for row in pass_done_markup(1).inline_keyboard
+            for button in row
+        ]
+        self.assertNotIn("Геометка склада", done)
+        self.assertIn("Показать пропуск", done)
         self.assertIn("Смена сегодня", button_labels(keyboard_for(StaffRole.security)))
         warehouse = button_labels(keyboard_for(StaffRole.warehouse))
         self.assertNotIn("Сканировать QR", warehouse)
@@ -145,6 +162,9 @@ class ScreenTests(unittest.TestCase):
         self.assertNotIn("А123АА77", text)
         late = late_text(start, end, "1", "А123АА77", ZONE)
         self.assertIn("Запишитесь снова", late)
+        end_at = datetime(2026, 11, 12, 10, 0, tzinfo=timezone.utc)
+        self.assertFalse(slot_has_passed(end_at, end_at - timedelta(minutes=1)))
+        self.assertTrue(slot_has_passed(end_at, end_at))
 
 
 if __name__ == "__main__":
