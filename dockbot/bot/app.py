@@ -18,6 +18,7 @@ from dockbot.bot.mine import router as mine_router
 from dockbot.bot.roles import router as roles_router
 from dockbot.bot.staff import router as staff_router
 from dockbot.bot.wizard import router as wizard_router
+from dockbot.bot.yard import router as yard_router
 from dockbot.config import ConfigError, Settings
 from dockbot.scheduler import shutdown_scheduler, start_scheduler
 
@@ -44,6 +45,7 @@ def build_dispatcher(engine: Engine) -> Dispatcher:
     dispatcher.include_router(roles_router)
     dispatcher.include_router(driver_router)
     dispatcher.include_router(staff_router)
+    dispatcher.include_router(yard_router)
     dispatcher.include_router(wizard_router)
     dispatcher.include_router(mine_router)
     dispatcher.include_router(admin_router)

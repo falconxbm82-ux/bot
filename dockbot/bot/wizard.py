@@ -27,6 +27,7 @@ from dockbot.booking import (
     available_dates,
     clean_cargo,
     clean_driver_name,
+    clean_places,
     clean_make,
     clean_weight_tons,
     booking_profile,
@@ -87,6 +88,7 @@ class BookFlow(StatesGroup):
     cargo_pick = State()
     weight = State()
     weight_note = State()
+    places = State()
     date = State()
     gate = State()
     slot = State()
@@ -290,7 +292,35 @@ async def show_document(
     await reply(event, text, cancel_step_markup())
 
 
+async def show_places(event: Message | CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(BookFlow.places)
+    await reply(event, "Число мест.", cancel_step_markup())
+
+
+@router.message(BookFlow.places, F.text)
+async def places_step(message: Message, state: FSMContext, engine: Engine) -> None:
+    if await _aborted_text(message, state):
+        return
+    try:
+        count = clean_places(message.text or "")
+    except FieldError as exc:
+        await message.answer(str(exc))
+        return
+    await state.update_data(places=count)
+    await _after_places(message, state, engine)
+
+
 async def _after_weight(
+    event: Message | CallbackQuery, state: FSMContext, engine: Engine
+) -> None:
+    data = await state.get_data()
+    if not data.get("places"):
+        await show_places(event, state)
+        return
+    await _after_places(event, state, engine)
+
+
+async def _after_places(
     event: Message | CallbackQuery, state: FSMContext, engine: Engine
 ) -> None:
     data = await state.get_data()
@@ -538,7 +568,8 @@ async def confirm(query: CallbackQuery, state: FSMContext, engine: Engine) -> No
             await reply(query, "Сводка устарела. Начните заново.", driver_menu())
             return
         if not moving and not all(
-            data.get(key) for key in ("plate", "make", "driver_name", "cargo", "weight_kg")
+            data.get(key)
+            for key in ("plate", "make", "driver_name", "cargo", "weight_kg", "places")
         ):
             await state.clear()
             await reply(query, "Сводка устарела. Начните заново.", driver_menu())
@@ -577,6 +608,7 @@ async def confirm(query: CallbackQuery, state: FSMContext, engine: Engine) -> No
                     doc_file_id=data.get("doc_file_id"),
                     doc_name=data.get("doc_name"),
                     doc_result=data.get("doc_result"),
+                    place_count=int(data["places"]),
                 )
         except SlotTaken as exc:
             await show_slots(query, state, engine, preface=str(exc))
@@ -779,6 +811,7 @@ async def show_summary(
         )
         weight_kg = trip.weight_kg
         document = None
+        places = trip.place_count
         await state.set_state(MoveFlow.summary)
     else:
         plate = data.get("plate", "")
@@ -787,6 +820,7 @@ async def show_summary(
         cargo = data.get("cargo", "")
         weight_kg = data.get("weight_kg")
         document = _doc_label(data.get("doc_result"))
+        places = data.get("places")
         await state.set_state(BookFlow.summary)
     formula = await _phrase(engine, data)
     await reply(
@@ -806,6 +840,7 @@ async def show_summary(
             weight_kg=weight_kg,
             document=document,
             formula=formula or None,
+            places=places,
         ),
         summary_markup(moving),
     )

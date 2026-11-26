@@ -48,6 +48,7 @@ from dockbot.checkpoint import (
     PassExpired,
     PassNotFound,
     TransitionRejected,
+    UnloadPaused,
     apply_mark,
     find_pass,
     load_trip,
@@ -424,9 +425,9 @@ async def mark_unloading(
 async def mark_completed(
     query: CallbackQuery, state: FSMContext, engine: Engine
 ) -> None:
-    await _mark(
-        query, state, engine, COMPLETED_PREFIX, BookingStatus.completed, card=False
-    )
+    from dockbot.bot.yard import begin_close
+
+    await begin_close(query, state, engine)
 
 
 async def _mark(
@@ -465,6 +466,9 @@ async def _mark(
         return
     except PassExpired:
         await _reply(query, PASS_EXPIRED)
+        return
+    except UnloadPaused:
+        await _reply(query, "Сначала продолжите разгрузку.")
         return
     except TransitionRejected:
         trip = await _current(engine, user.id, booking_id)

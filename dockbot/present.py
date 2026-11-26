@@ -6,6 +6,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from dockbot.booking import DURATION_CAP_MINUTES, Trip
+from dockbot.yard import FACT_LABEL, PAUSE_LABEL
 from dockbot.models import BookingStatus
 
 PASS_EXPIRED = "Время слота прошло. Пропуск недействителен."
@@ -116,6 +117,7 @@ def pass_caption(trip: Trip, zone: ZoneInfo) -> str:
         lines.append(formula)
     if trip.doc_result or trip.doc_name:
         lines.append(document_line(trip))
+    lines.extend(yard_lines(trip))
     return "\n".join(lines)
 
 
@@ -135,6 +137,7 @@ def summary_text(
     weight_kg: int | None = None,
     document: str | None = None,
     formula: str | None = None,
+    places: int | None = None,
 ) -> str:
     date_text, clock = local_parts(start, end, zone)
     title = "Перенос брони." if moving else "Проверьте запись."
@@ -148,6 +151,8 @@ def summary_text(
         f"ФИО: {driver_name}",
         f"Груз: {cargo_detail(cargo_type, weight_kg, start, end)}",
     ]
+    if places:
+        lines.append(f"Мест: {places}")
     if formula:
         lines.append(formula)
     if document:
@@ -187,9 +192,26 @@ def card_text(
     )
     if show_document:
         lines.append(document_line(trip))
+    lines.extend(yard_lines(trip))
     if block:
         lines.append(block)
     return "\n".join(lines)
+
+
+def yard_lines(trip: Trip) -> list[str]:
+    """Пауза, расхождение и закрытие рейса. Эти строки видит и водитель."""
+    lines: list[str] = []
+    if trip.place_count:
+        lines.append(f"Мест: {trip.place_count}")
+    if trip.pause_reason in PAUSE_LABEL:
+        lines.append(f"Пауза: {PAUSE_LABEL[trip.pause_reason]}")
+    if trip.fact_kind in FACT_LABEL and trip.fact_value:
+        lines.append(f"Расхождение: {FACT_LABEL[trip.fact_kind]}, факт {trip.fact_value}")
+    if trip.pallet_damage:
+        lines.append("Повреждение паллет.")
+    if trip.status is BookingStatus.completed:
+        lines.append("Рейс закрыт.")
+    return lines
 
 
 def trip_button(trip: Trip, zone: ZoneInfo) -> str:

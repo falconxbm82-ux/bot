@@ -24,6 +24,7 @@ from dockbot.booking import (
     available_dates,
     clean_cargo,
     clean_driver_name,
+    clean_places,
     clean_make,
     clean_weight_tons,
     create_booking,
@@ -68,6 +69,7 @@ class DeskFlow(StatesGroup):
     cargo_note = State()
     weight = State()
     weight_note = State()
+    places = State()
     date = State()
     gate = State()
     slot = State()
@@ -151,7 +153,7 @@ async def desk_weight(query: CallbackQuery, state: FSMContext, engine: Engine) -
         await query.answer("Кнопка устарела", show_alert=True)
         return
     await state.update_data(weight_kg=int(raw))
-    await _dates(query, state, engine)
+    await _ask_places(query, state)
 
 
 @router.message(DeskFlow.weight_note, F.text)
@@ -163,7 +165,7 @@ async def desk_weight_note(message: Message, state: FSMContext, engine: Engine) 
         await message.answer(str(exc))
         return
     await state.update_data(weight_kg=weight_kg)
-    await _dates(message, state, engine)
+    await _ask_places(message, state)
 
 
 @router.callback_query(DeskFlow.date, F.data.startswith(DATE_PREFIX))
@@ -276,6 +278,7 @@ async def desk_name(message: Message, state: FSMContext, engine: Engine) -> None
             chat_id=None,
             vehicle=data.get("vehicle") or "heavy",
             weight_kg=data.get("weight_kg"),
+            place_count=data.get("places"),
         )
     except SlotTaken as exc:
         await message.answer(str(exc))
@@ -301,6 +304,25 @@ async def desk_name(message: Message, state: FSMContext, engine: Engine) -> None
         caption=pass_caption(trip, zone) + "\n" + _NOTE,
     )
     await message.answer(_NOTE, reply_markup=keyboard_for(StaffRole.admin))
+
+
+async def _ask_places(event: Message | CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(DeskFlow.places)
+    if isinstance(event, Message):
+        await event.answer("Число мест.")
+        return
+    await reply(event, "Число мест.", menu_markup())
+
+
+@router.message(DeskFlow.places, F.text)
+async def desk_places(message: Message, state: FSMContext, engine: Engine) -> None:
+    try:
+        count = clean_places(message.text or "")
+    except FieldError as exc:
+        await message.answer(str(exc))
+        return
+    await state.update_data(places=count)
+    await _dates(message, state, engine)
 
 
 async def _dates(event, state: FSMContext, engine: Engine) -> None:

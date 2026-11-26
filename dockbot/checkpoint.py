@@ -64,6 +64,10 @@ class TransitionRejected(Exception):
     """Переход статусу не положен. Строка не менялась."""
 
 
+class UnloadPaused(Exception):
+    """Разгрузка на паузе. Статус не менялся."""
+
+
 def allowed_next(status: BookingStatus) -> BookingStatus | None:
     return NEXT.get(status)
 
@@ -142,6 +146,8 @@ def apply_mark(
                 raise PassNotFound()
             if target is BookingStatus.arrived and slot_has_passed(booking.slot_end, moment):
                 raise PassExpired()
+            if target is BookingStatus.unloading and booking.pause_reason:
+                raise UnloadPaused()
             if NEXT.get(booking.status) != target:
                 raise TransitionRejected()
             if target is BookingStatus.unloading and gate_id is not None:
