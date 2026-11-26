@@ -1,8 +1,8 @@
 """Чтение окружения.
 
 Токен бота и строка подключения читаются отсюда и нигде не печатаются.
-Пустые пояс, геометка или окно отмены не мешают опросу Telegram.
-Служба напоминаний без них не стартует: это проверяет require_site.
+Пустые необязательные ключи не останавливают опрос: вместо них берётся стенд.
+Широта и долгота пустыми и остаются. Без этой пары напоминания не стартуют.
 """
 
 from __future__ import annotations
@@ -19,6 +19,13 @@ PROJECT_ROOT = PACKAGE_ROOT.parent
 
 # Длина PIN персонала на стенде. В ТЗ не задана.
 STAFF_PIN_LENGTH = 4
+STAND_TIME_ZONE = "Europe/Moscow"
+STAND_CANCEL_HOURS = 2
+STAND_GATES = (("1", "Ворота 1"), ("2", "Ворота 2"))
+STAND_WEEKDAYS = (1, 2, 3, 4, 5)
+STAND_OPEN = time(8, 0)
+STAND_CLOSE = time(18, 0)
+STAND_SLOT_MINUTES = 60
 
 
 class ConfigError(Exception):
@@ -118,14 +125,13 @@ class Settings:
 
 def load_settings() -> Settings:
     _load_dotenv(PROJECT_ROOT / ".env")
-    time_zone = _optional_str("WAREHOUSE_TIMEZONE")
-    if time_zone is not None:
-        try:
-            ZoneInfo(time_zone)
-        except Exception as exc:
-            raise ConfigError(
-                f"WAREHOUSE_TIMEZONE не является поясом IANA: {time_zone}"
-            ) from exc
+    time_zone = _optional_str("WAREHOUSE_TIMEZONE") or STAND_TIME_ZONE
+    try:
+        ZoneInfo(time_zone)
+    except Exception as exc:
+        raise ConfigError(
+            f"WAREHOUSE_TIMEZONE не является поясом IANA: {time_zone}"
+        ) from exc
     latitude = _optional_float("WAREHOUSE_LATITUDE")
     longitude = _optional_float("WAREHOUSE_LONGITUDE")
     if latitude is not None and not -90 <= latitude <= 90:
@@ -136,13 +142,11 @@ def load_settings() -> Settings:
         raise ConfigError(
             "Геометку задают парой: WAREHOUSE_LATITUDE и WAREHOUSE_LONGITUDE"
         )
-    gates = _gates()
-    weekdays, gate_open, gate_close, slot_minutes = _schedule(bool(gates))
+    gates = _gates() or STAND_GATES
+    weekdays, gate_open, gate_close, slot_minutes = _schedule()
     cancel_window_hours = _optional_hours("CANCEL_WINDOW_HOURS")
-    if gates and (time_zone is None or cancel_window_hours is None):
-        raise ConfigError(
-            "Для сетки ворот задайте WAREHOUSE_TIMEZONE и CANCEL_WINDOW_HOURS"
-        )
+    if cancel_window_hours is None:
+        cancel_window_hours = STAND_CANCEL_HOURS
     return Settings(
         bot_token=os.environ.get("BOT_TOKEN", "").strip(),
         database_url=os.environ.get("DATABASE_URL", "").strip(),
@@ -282,23 +286,31 @@ def _gates() -> tuple[tuple[str, str], ...]:
     return tuple(gates)
 
 
-def _schedule(
-    gates_present: bool,
-) -> tuple[tuple[int, ...], time | None, time | None, int | None]:
+def _schedule() -> tuple[tuple[int, ...], time, time, int]:
+    """Пустое поле сетки берёт стенд и не останавливает запуск."""
     weekdays_raw = os.environ.get("GATE_WEEKDAYS", "").strip()
     open_raw = os.environ.get("GATE_OPEN", "").strip()
     close_raw = os.environ.get("GATE_CLOSE", "").strip()
     slot_raw = os.environ.get("SLOT_MINUTES", "").strip()
-    pieces = (weekdays_raw, open_raw, close_raw, slot_raw)
-    if not gates_present and not any(pieces):
-        return (), None, None, None
-    if not gates_present or not all(pieces):
-        raise ConfigError(
-            "Сетку ворот задают вместе: GATES, GATE_WEEKDAYS, "
-            "GATE_OPEN, GATE_CLOSE, SLOT_MINUTES"
-        )
+    weekdays = _weekdays(weekdays_raw) if weekdays_raw else STAND_WEEKDAYS
+    gate_open = _clock("GATE_OPEN", open_raw) if open_raw else STAND_OPEN
+    gate_close = _clock("GATE_CLOSE", close_raw) if close_raw else STAND_CLOSE
+    if gate_close <= gate_open:
+        raise ConfigError("GATE_CLOSE должно быть позже GATE_OPEN")
+    if not slot_raw:
+        return weekdays, gate_open, gate_close, STAND_SLOT_MINUTES
+    try:
+        slot_minutes = int(slot_raw)
+    except ValueError as exc:
+        raise ConfigError("SLOT_MINUTES должно быть целым числом") from exc
+    if slot_minutes <= 0:
+        raise ConfigError("SLOT_MINUTES должно быть больше нуля")
+    return weekdays, gate_open, gate_close, slot_minutes
+
+
+def _weekdays(raw: str) -> tuple[int, ...]:
     weekdays: list[int] = []
-    for item in weekdays_raw.split(","):
+    for item in raw.split(","):
         item = item.strip()
         if not item:
             continue
@@ -313,17 +325,7 @@ def _schedule(
         weekdays.append(day)
     if not weekdays:
         raise ConfigError("GATE_WEEKDAYS не содержит дней")
-    gate_open = _clock("GATE_OPEN", open_raw)
-    gate_close = _clock("GATE_CLOSE", close_raw)
-    if gate_close <= gate_open:
-        raise ConfigError("GATE_CLOSE должно быть позже GATE_OPEN")
-    try:
-        slot_minutes = int(slot_raw)
-    except ValueError as exc:
-        raise ConfigError("SLOT_MINUTES должно быть целым числом") from exc
-    if slot_minutes <= 0:
-        raise ConfigError("SLOT_MINUTES должно быть больше нуля")
-    return tuple(weekdays), gate_open, gate_close, slot_minutes
+    return tuple(weekdays)
 
 
 def _clock(name: str, raw: str) -> time:

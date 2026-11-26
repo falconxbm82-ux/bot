@@ -1000,6 +1000,56 @@ class StaffTests(unittest.TestCase):
             assert custom is not None
             self.assertTrue(verify_pin("2468", custom.pin_hash))
 
+    def test_blank_environment_writes_the_stand_grid_and_pins(self) -> None:
+        import os
+        from unittest.mock import patch
+
+        from dockbot.config import load_settings
+        from dockbot.configure import apply_configuration
+
+        self._wipe()
+        blank = {
+            "BOT_TOKEN": "test-token",
+            "DATABASE_URL": "postgresql+psycopg://dockbot@127.0.0.1:5432/dockbot",
+            "WAREHOUSE_TIMEZONE": "",
+            "WAREHOUSE_LATITUDE": "",
+            "WAREHOUSE_LONGITUDE": "",
+            "CANCEL_WINDOW_HOURS": "",
+            "GATES": "",
+            "GATE_WEEKDAYS": "",
+            "GATE_OPEN": "",
+            "GATE_CLOSE": "",
+            "SLOT_MINUTES": "",
+            "STAFF": "",
+        }
+        with patch.dict(os.environ, blank, clear=False):
+            settings = load_settings()
+        apply_configuration(ENGINE, settings)
+        ensure_stand_staff(ENGINE)
+        with Session(ENGINE) as session:
+            row = session.get(SiteSettings, 1)
+            assert row is not None
+            self.assertEqual(row.time_zone, "Europe/Moscow")
+            self.assertEqual(row.cancel_window_hours, 2)
+            self.assertIsNone(row.latitude)
+            self.assertIsNone(row.longitude)
+            gates = session.scalars(select(Gate).order_by(Gate.code)).all()
+            self.assertEqual([gate.code for gate in gates], ["1", "2"])
+            hours = session.scalars(select(GateHour)).all()
+            self.assertEqual(len(hours), 10)
+            for hour in hours:
+                self.assertIn(hour.weekday, (1, 2, 3, 4, 5))
+                self.assertEqual(hour.start_time, time(8, 0))
+                self.assertEqual(hour.end_time, time(18, 0))
+                self.assertEqual(hour.slot_minutes, 60)
+            pins = {
+                person.role: person.pin_hash
+                for person in session.scalars(select(StaffUser)).all()
+            }
+        self.assertTrue(verify_pin("1111", pins[StaffRole.security]))
+        self.assertTrue(verify_pin("2222", pins[StaffRole.warehouse]))
+        self.assertTrue(verify_pin("3333", pins[StaffRole.admin]))
+
     def test_closed_slot_is_not_bookable_and_busy_slot_stays_open(self) -> None:
         self._staff(pin="3333", telegram_id=STAFF_TG, name="Администратор", role=StaffRole.admin)
         start = _at(TOMORROW, 9)
