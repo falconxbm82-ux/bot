@@ -239,10 +239,33 @@ class BookingTests(unittest.TestCase):
         )
         self.assertEqual(trip.unload_total, 75)
         self.assertEqual(trip.slot_end - trip.slot_start, timedelta(minutes=75))
-        self.assertIn(
-            "Разгрузка: база 60 мин, масса +15 мин, итого 75 мин, потолок 240",
-            card_text(trip, ZONE, None),
+        formula = "Разгрузка: база 60 мин, масса +15 мин, итого 75 мин, потолок 240"
+        card = card_text(trip, ZONE, None)
+        self.assertEqual(card.count(formula), 1)
+        from dockbot.present import pass_caption, summary_text
+        from dockbot.bot.wizard import prompt_with_phrase
+
+        self.assertEqual(pass_caption(trip, ZONE).count(formula), 1)
+        summary = summary_text(
+            start=trip.slot_start,
+            end=trip.slot_end,
+            gate_code=trip.gate_code,
+            plate=trip.plate,
+            make=trip.make,
+            driver_name=trip.driver_name,
+            cargo_type=trip.cargo_type,
+            zone=ZONE,
+            moving=False,
+            weight_kg=trip.weight_kg,
+            formula=formula,
         )
+        self.assertEqual(summary.count(formula), 1)
+        prompt = prompt_with_phrase("Выберите дату.", formula, formula)
+        self.assertEqual(prompt.count(formula), 1)
+        self.assertTrue(prompt.endswith("Выберите дату."))
+        mixed = prompt_with_phrase("Выберите время.", formula, "Это окно больше недоступно.")
+        self.assertEqual(mixed.count(formula), 1)
+        self.assertIn("Это окно больше недоступно.", mixed)
         hidden = [
             item.start
             for item in slots_for_gate(
@@ -583,7 +606,7 @@ class BookingTests(unittest.TestCase):
             offered_cargos,
             unload_minutes,
         )
-        from dockbot.present import card_text
+        from dockbot.present import card_text, pass_caption
         from sqlalchemy import update
 
         from dockbot.models import CargoNorm
@@ -638,6 +661,8 @@ class BookingTests(unittest.TestCase):
         self.assertIn("Транспорт: малотоннажный", card)
         self.assertIn("малотоннажный минус", card)
         self.assertIn("потолок 120", card)
+        self.assertEqual(card.count("Разгрузка:"), 1)
+        self.assertEqual(pass_caption(trip, ZONE).count("Разгрузка:"), 1)
         with self.assertRaises(FieldError):
             create_booking(
                 ENGINE,

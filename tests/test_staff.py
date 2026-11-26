@@ -1387,10 +1387,9 @@ class StaffTests(unittest.TestCase):
         self.assertIn("6 т", line)
         self.assertIn("75 мин", line)
         self.assertIn("Паллеты, 6 т, 75 мин", card)
-        self.assertIn(
-            "Разгрузка: база 60 мин, масса +15 мин, итого 75 мин, потолок 240",
-            card,
-        )
+        formula = "Разгрузка: база 60 мин, масса +15 мин, итого 75 мин, потолок 240"
+        self.assertEqual(card.count(formula), 1)
+        self.assertEqual(trip_line(heavy, ZONE).count(formula), 0)
 
     def test_document_check_stores_photo_and_guard_can_refuse(self) -> None:
         self._staff(pin="1111", telegram_id=STAFF_TG)

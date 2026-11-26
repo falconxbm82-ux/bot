@@ -328,7 +328,7 @@ async def _after_places(
     if data.get("driver_name"):
         await show_document(event, state, phrase or None)
         return
-    await show_dates(event, state, engine, preface=phrase or None)
+    await show_dates(event, state, engine)
 
 
 async def begin_move(
@@ -695,17 +695,14 @@ async def show_dates(
     dates = dates[:WIZARD_DAYS]
     await state.set_state(MoveFlow.date if moving else BookFlow.date)
     if not dates:
-        text = "Нет свободных окон. Нажмите «В меню» или попробуйте позже."
-        if preface:
-            text = f"{preface}\n{text}"
+        text = prompt_with_phrase(
+            "Нет свободных окон. Нажмите «В меню» или попробуйте позже.",
+            await _phrase(engine, data),
+            preface,
+        )
         await reply(event, text, menu_markup())
         return
-    text = "Выберите дату."
-    phrase = await _phrase(engine, data)
-    if phrase:
-        text = f"{phrase}\n{text}"
-    if preface:
-        text = f"{preface}\n{text}"
+    text = prompt_with_phrase("Выберите дату.", await _phrase(engine, data), preface)
     await reply(event, text, dates_markup(dates))
 
 
@@ -782,12 +779,7 @@ async def show_slots(
             except BookingError:
                 current = None
     await state.set_state(MoveFlow.slot if moving else BookFlow.slot)
-    text = "Выберите время."
-    phrase = await _phrase(engine, data)
-    if phrase:
-        text = f"{phrase}\n{text}"
-    if preface:
-        text = f"{preface}\n{text}"
+    text = prompt_with_phrase("Выберите время.", await _phrase(engine, data), preface)
     await reply(event, text, slots_markup(choices, zone, current))
 
 
@@ -876,6 +868,17 @@ async def _party(
             return profile
     weight = data.get("weight_kg")
     return data.get("cargo"), data.get("vehicle"), None if weight is None else int(weight)
+
+
+def prompt_with_phrase(body: str, phrase: str, preface: str | None) -> str:
+    """Формула окна один раз. Чужое вступление остаётся над ней."""
+    lines: list[str] = []
+    if preface and preface != phrase:
+        lines.append(preface)
+    if phrase:
+        lines.append(phrase)
+    lines.append(body)
+    return "\n".join(lines)
 
 
 async def _phrase(engine: Engine, data: dict) -> str:

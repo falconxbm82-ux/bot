@@ -118,7 +118,7 @@ def pass_caption(trip: Trip, zone: ZoneInfo) -> str:
     if trip.doc_result or trip.doc_name:
         lines.append(document_line(trip))
     lines.extend(yard_lines(trip))
-    return "\n".join(lines)
+    return _once(lines)
 
 
 def summary_text(
@@ -161,7 +161,7 @@ def summary_text(
         lines.append("Транспорт: малотоннажный" if vehicle == "light" else "Транспорт: обычный")
     if rules:
         lines.append(rules)
-    return "\n".join(lines)
+    return _once(lines)
 
 
 def card_text(
@@ -195,7 +195,17 @@ def card_text(
     lines.extend(yard_lines(trip))
     if block:
         lines.append(block)
-    return "\n".join(lines)
+    return _once(lines)
+
+
+def _once(lines: list[str]) -> str:
+    """Соседние одинаковые строки не повторяются."""
+    kept: list[str] = []
+    for line in lines:
+        if kept and kept[-1] == line:
+            continue
+        kept.append(line)
+    return "\n".join(kept)
 
 
 def yard_lines(trip: Trip) -> list[str]:
