@@ -19,6 +19,7 @@ from dockbot.booking import (
     DAY_TAKEN,
     HEAVY_CARGOS,
     LIGHT_CARGOS,
+    NAME_MISMATCH,
     NOT_LISTED,
     BookingError,
     FieldError,
@@ -27,11 +28,12 @@ from dockbot.booking import (
     available_dates,
     clean_cargo,
     clean_driver_name,
+    clean_places,
     clean_make,
     clean_weight_tons,
     booking_profile,
     create_booking,
-    driver_known,
+    roster_problem,
     gates_with_slots,
     window_rules,
     get_owned,
@@ -87,6 +89,7 @@ class BookFlow(StatesGroup):
     cargo_pick = State()
     weight = State()
     weight_note = State()
+    places = State()
     date = State()
     gate = State()
     slot = State()
@@ -290,7 +293,35 @@ async def show_document(
     await reply(event, text, cancel_step_markup())
 
 
+async def show_places(event: Message | CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(BookFlow.places)
+    await reply(event, "Число мест.", cancel_step_markup())
+
+
+@router.message(BookFlow.places, F.text)
+async def places_step(message: Message, state: FSMContext, engine: Engine) -> None:
+    if await _aborted_text(message, state):
+        return
+    try:
+        count = clean_places(message.text or "")
+    except FieldError as exc:
+        await message.answer(str(exc))
+        return
+    await state.update_data(places=count)
+    await _after_places(message, state, engine)
+
+
 async def _after_weight(
+    event: Message | CallbackQuery, state: FSMContext, engine: Engine
+) -> None:
+    data = await state.get_data()
+    if not data.get("places"):
+        await show_places(event, state)
+        return
+    await _after_places(event, state, engine)
+
+
+async def _after_places(
     event: Message | CallbackQuery, state: FSMContext, engine: Engine
 ) -> None:
     data = await state.get_data()
@@ -298,7 +329,7 @@ async def _after_weight(
     if data.get("driver_name"):
         await show_document(event, state, phrase or None)
         return
-    await show_dates(event, state, engine, preface=phrase or None)
+    await show_dates(event, state, engine)
 
 
 async def begin_move(
@@ -350,6 +381,12 @@ async def pick_slot(query: CallbackQuery, state: FSMContext, engine: Engine) -> 
         await show_summary(query, state, engine)
         return
     if all(data.get(key) for key in ("plate", "make", "driver_name", "cargo")):
+        if not data.get("places"):
+            await show_places(query, state)
+            return
+        if data.get("doc_result") != "match":
+            await show_document(query, state)
+            return
         await show_summary(query, state, engine)
         return
     await state.set_state(BookFlow.plate)
@@ -399,6 +436,9 @@ async def name_step(message: Message, state: FSMContext, engine: Engine) -> None
     await state.update_data(driver_name=field.value)
     data = await state.get_data()
     if data.get("cargo") and data.get("weight_kg"):
+        if not data.get("places"):
+            await show_places(message, state)
+            return
         await show_document(message, state)
         return
     if data.get("cargo"):
@@ -424,9 +464,15 @@ async def cargo_button(query: CallbackQuery, state: FSMContext, engine: Engine) 
     await state.update_data(cargo=label)
     data = await state.get_data()
     if data.get("weight_kg") and data.get("driver_name"):
+        if not data.get("places"):
+            await show_places(query, state)
+            return
         await show_document(query, state)
         return
     if data.get("weight_kg"):
+        if not data.get("places"):
+            await show_places(query, state)
+            return
         await show_dates(query, state, engine)
         return
     await show_weight(query, state)
@@ -457,6 +503,9 @@ async def cargo_note(message: Message, state: FSMContext, engine: Engine) -> Non
     data = await state.get_data()
     if not data.get("weight_kg"):
         await show_weight(message, state)
+        return
+    if not data.get("places"):
+        await show_places(message, state)
         return
     if data.get("driver_name"):
         await show_document(message, state)
@@ -493,6 +542,7 @@ async def edit_details(query: CallbackQuery, state: FSMContext) -> None:
         "vehicle": data.get("vehicle"),
         "cargo": data.get("cargo"),
         "weight_kg": data.get("weight_kg"),
+        "places": data.get("places"),
         "keyboard_hidden": data.get("keyboard_hidden"),
     }
     await state.set_data(kept)
@@ -538,7 +588,8 @@ async def confirm(query: CallbackQuery, state: FSMContext, engine: Engine) -> No
             await reply(query, "Сводка устарела. Начните заново.", driver_menu())
             return
         if not moving and not all(
-            data.get(key) for key in ("plate", "make", "driver_name", "cargo", "weight_kg")
+            data.get(key)
+            for key in ("plate", "make", "driver_name", "cargo", "weight_kg", "places")
         ):
             await state.clear()
             await reply(query, "Сводка устарела. Начните заново.", driver_menu())
@@ -577,6 +628,7 @@ async def confirm(query: CallbackQuery, state: FSMContext, engine: Engine) -> No
                     doc_file_id=data.get("doc_file_id"),
                     doc_name=data.get("doc_name"),
                     doc_result=data.get("doc_result"),
+                    place_count=int(data["places"]),
                 )
         except SlotTaken as exc:
             await show_slots(query, state, engine, preface=str(exc))
@@ -644,17 +696,14 @@ async def show_dates(
     dates = dates[:WIZARD_DAYS]
     await state.set_state(MoveFlow.date if moving else BookFlow.date)
     if not dates:
-        text = "Нет свободных окон. Нажмите «В меню» или попробуйте позже."
-        if preface:
-            text = f"{preface}\n{text}"
+        text = prompt_with_phrase(
+            "Нет свободных окон. Нажмите «В меню» или попробуйте позже.",
+            await _phrase(engine, data),
+            preface,
+        )
         await reply(event, text, menu_markup())
         return
-    text = "Выберите дату."
-    phrase = await _phrase(engine, data)
-    if phrase:
-        text = f"{phrase}\n{text}"
-    if preface:
-        text = f"{preface}\n{text}"
+    text = prompt_with_phrase("Выберите дату.", await _phrase(engine, data), preface)
     await reply(event, text, dates_markup(dates))
 
 
@@ -731,12 +780,7 @@ async def show_slots(
             except BookingError:
                 current = None
     await state.set_state(MoveFlow.slot if moving else BookFlow.slot)
-    text = "Выберите время."
-    phrase = await _phrase(engine, data)
-    if phrase:
-        text = f"{phrase}\n{text}"
-    if preface:
-        text = f"{preface}\n{text}"
+    text = prompt_with_phrase("Выберите время.", await _phrase(engine, data), preface)
     await reply(event, text, slots_markup(choices, zone, current))
 
 
@@ -779,6 +823,7 @@ async def show_summary(
         )
         weight_kg = trip.weight_kg
         document = None
+        places = trip.place_count
         await state.set_state(MoveFlow.summary)
     else:
         plate = data.get("plate", "")
@@ -787,6 +832,7 @@ async def show_summary(
         cargo = data.get("cargo", "")
         weight_kg = data.get("weight_kg")
         document = _doc_label(data.get("doc_result"))
+        places = data.get("places")
         await state.set_state(BookFlow.summary)
     formula = await _phrase(engine, data)
     await reply(
@@ -806,6 +852,7 @@ async def show_summary(
             weight_kg=weight_kg,
             document=document,
             formula=formula or None,
+            places=places,
         ),
         summary_markup(moving),
     )
@@ -822,6 +869,17 @@ async def _party(
             return profile
     weight = data.get("weight_kg")
     return data.get("cargo"), data.get("vehicle"), None if weight is None else int(weight)
+
+
+def prompt_with_phrase(body: str, phrase: str, preface: str | None) -> str:
+    """Формула окна один раз. Чужое вступление остаётся над ней."""
+    lines: list[str] = []
+    if preface and preface != phrase:
+        lines.append(preface)
+    if phrase:
+        lines.append(phrase)
+    lines.append(body)
+    return "\n".join(lines)
 
 
 async def _phrase(engine: Engine, data: dict) -> str:
@@ -860,11 +918,14 @@ async def _party_allowed(
     data: dict,
 ) -> bool:
     try:
-        known = await asyncio.to_thread(driver_known, engine, plate, name)
+        problem = await asyncio.to_thread(roster_problem, engine, plate, name)
     except FieldError as exc:
         await message.answer(str(exc))
         return False
-    if not known:
+    if problem == NAME_MISMATCH:
+        await message.answer(NAME_MISMATCH)
+        return False
+    if problem:
         await state.set_state(BookFlow.plate)
         await message.answer(
             f"{NOT_LISTED}\nГосномер, например А123ВС178.",

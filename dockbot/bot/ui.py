@@ -13,7 +13,14 @@ from aiogram.types import (
     ReplyKeyboardMarkup,
 )
 
-from dockbot.booking import HEAVY_CARGOS, LIGHT_CARGOS, GateChoice, SlotChoice, Trip
+from dockbot.booking import (
+    HEAVY_CARGOS,
+    LIGHT_CARGOS,
+    GateChoice,
+    SlotChoice,
+    Trip,
+    slot_has_passed,
+)
 from dockbot.bot.keyboard import CALLBACK_BOOK, CALLBACK_LIST, NAV_MENU
 from dockbot.models import BookingStatus
 from dockbot.present import day_button, trip_button
@@ -47,6 +54,8 @@ _PASS_STATUSES = {
     BookingStatus.booked,
     BookingStatus.confirmed,
     BookingStatus.arrived,
+    BookingStatus.unloading,
+    BookingStatus.completed,
 }
 CARGO_LABELS = dict(HEAVY_CARGOS + LIGHT_CARGOS)
 
@@ -325,7 +334,7 @@ def empty_bookings_markup() -> InlineKeyboardMarkup:
 
 def card_markup(trip: Trip, can_change: bool) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
-    if trip.status in _PASS_STATUSES:
+    if trip.status in _PASS_STATUSES and not slot_has_passed(trip.slot_end):
         rows.append(
             [
                 InlineKeyboardButton(

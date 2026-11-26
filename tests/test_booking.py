@@ -159,7 +159,7 @@ class BookingTests(unittest.TestCase):
 
     def test_same_plate_or_driver_cannot_book_the_same_day_twice(self) -> None:
         from dockbot.booking import pair_booked_on
-        from dockbot.roster import NOT_LISTED
+        from dockbot.roster import NAME_MISMATCH, NOT_LISTED
 
         first = self._book(TOMORROW, 8, plate="a100aa77")
         self.assertEqual(first.plate, "А100АА77")
@@ -188,7 +188,17 @@ class BookingTests(unittest.TestCase):
                 chat_id=9,
                 driver_name="Петров Петр Петрович",
             )
-        self.assertEqual(str(unknown.exception), NOT_LISTED)
+        self.assertEqual(str(unknown.exception), NAME_MISMATCH)
+        with self.assertRaises(BookingError) as absent:
+            self._book(
+                TOMORROW,
+                10,
+                plate="А111АА77",
+                telegram_id=9,
+                chat_id=9,
+                driver_name="Петров Петр Петрович",
+            )
+        self.assertEqual(str(absent.exception), NOT_LISTED)
         cancel_booking(ENGINE, telegram_id=1, chat_id=1, booking_id=first.id, now=NOW)
         again = self._book(TOMORROW, 9, plate="А100АА77")
         self.assertNotEqual(again.id, first.id)
@@ -239,10 +249,33 @@ class BookingTests(unittest.TestCase):
         )
         self.assertEqual(trip.unload_total, 75)
         self.assertEqual(trip.slot_end - trip.slot_start, timedelta(minutes=75))
-        self.assertIn(
-            "Разгрузка: база 60 мин, масса +15 мин, итого 75 мин, потолок 240",
-            card_text(trip, ZONE, None),
+        formula = "Разгрузка: база 60 мин, масса +15 мин, итого 75 мин, потолок 240"
+        card = card_text(trip, ZONE, None)
+        self.assertEqual(card.count(formula), 1)
+        from dockbot.present import pass_caption, summary_text
+        from dockbot.bot.wizard import prompt_with_phrase
+
+        self.assertEqual(pass_caption(trip, ZONE).count(formula), 1)
+        summary = summary_text(
+            start=trip.slot_start,
+            end=trip.slot_end,
+            gate_code=trip.gate_code,
+            plate=trip.plate,
+            make=trip.make,
+            driver_name=trip.driver_name,
+            cargo_type=trip.cargo_type,
+            zone=ZONE,
+            moving=False,
+            weight_kg=trip.weight_kg,
+            formula=formula,
         )
+        self.assertEqual(summary.count(formula), 1)
+        prompt = prompt_with_phrase("Выберите дату.", formula, formula)
+        self.assertEqual(prompt.count(formula), 1)
+        self.assertTrue(prompt.endswith("Выберите дату."))
+        mixed = prompt_with_phrase("Выберите время.", formula, "Это окно больше недоступно.")
+        self.assertEqual(mixed.count(formula), 1)
+        self.assertIn("Это окно больше недоступно.", mixed)
         hidden = [
             item.start
             for item in slots_for_gate(
@@ -583,11 +616,11 @@ class BookingTests(unittest.TestCase):
             offered_cargos,
             unload_minutes,
         )
-        from dockbot.present import card_text
+        from dockbot.present import card_text, pass_caption
         from sqlalchemy import update
 
         from dockbot.models import CargoNorm
-        from dockbot.roster import LIGHT_NORMS, NOT_LISTED, STAND_DRIVERS
+        from dockbot.roster import LIGHT_NORMS, NAME_MISMATCH, STAND_DRIVERS
 
         with Session(ENGINE) as session:
             with session.begin():
@@ -638,6 +671,8 @@ class BookingTests(unittest.TestCase):
         self.assertIn("Транспорт: малотоннажный", card)
         self.assertIn("малотоннажный минус", card)
         self.assertIn("потолок 120", card)
+        self.assertEqual(card.count("Разгрузка:"), 1)
+        self.assertEqual(pass_caption(trip, ZONE).count("Разгрузка:"), 1)
         with self.assertRaises(FieldError):
             create_booking(
                 ENGINE,
@@ -666,7 +701,43 @@ class BookingTests(unittest.TestCase):
                 chat_id=3,
                 now=NOW,
             )
-        self.assertEqual(str(missing.exception), NOT_LISTED)
+        self.assertEqual(str(missing.exception), NAME_MISMATCH)
+
+    def test_latin_plate_matches_the_roster_and_rejects_another_name(self) -> None:
+        from dockbot.roster import NAME_MISMATCH
+
+        petrov = self._book(
+            TOMORROW,
+            8,
+            plate="B200BB77",
+            driver_name="Петров Петр Петрович",
+            telegram_id=21,
+            chat_id=21,
+            gate_id=self.gate_b,
+        )
+        self.assertEqual(petrov.plate, "В200ВВ77")
+        self.assertEqual(petrov.driver_name, "Петров Петр Петрович")
+        sidorov = self._book(
+            TOMORROW,
+            9,
+            plate="C300CC77",
+            driver_name="Сидоров Сидор Сидорович",
+            telegram_id=22,
+            chat_id=22,
+            gate_id=self.gate_b,
+        )
+        self.assertEqual(sidorov.plate, "С300СС77")
+        with self.assertRaises(BookingError) as mismatch:
+            self._book(
+                TOMORROW,
+                10,
+                plate="B200BB77",
+                driver_name="Сидоров Сидор Сидорович",
+                telegram_id=23,
+                chat_id=23,
+                gate_id=self.gate_b,
+            )
+        self.assertEqual(str(mismatch.exception), NAME_MISMATCH)
 
     def _book(
         self,

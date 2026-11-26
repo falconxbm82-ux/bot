@@ -67,6 +67,7 @@ from dockbot.booking import (  # noqa: E402
     unload_minutes,
     window_phrase,
     list_live,
+    list_closed_today,
     queue_note,
     slots_for_gate,
     update_vehicle,
@@ -77,6 +78,7 @@ from dockbot.checkpoint import (  # noqa: E402
     PassExpired,
     PassNotFound,
     TransitionRejected,
+    UnloadPaused,
     apply_mark,
     find_pass,
     mark_departed,
@@ -102,8 +104,21 @@ from dockbot.models import (  # noqa: E402
 )
 from dockbot.documents import discard_document, document_path, judge  # noqa: E402
 from dockbot.passes import new_token, qr_png  # noqa: E402
-from dockbot.present import card_text  # noqa: E402
+from dockbot.present import card_text, pass_caption  # noqa: E402
 from dockbot.qrscan import decode_qr  # noqa: E402
+from dockbot.yard import (  # noqa: E402
+    CloseMismatch,
+    YardError,
+    assert_can_close,
+    close_unload,
+    mark_damage,
+    queue_for_trip,
+    record_fact,
+    resume_unload,
+    save_unload_photo,
+    set_pause,
+    start_unload,
+)
 from dockbot.shiftboard import (  # noqa: E402
     actions_for,
     checkpoint_actions,
@@ -985,6 +1000,56 @@ class StaffTests(unittest.TestCase):
             assert custom is not None
             self.assertTrue(verify_pin("2468", custom.pin_hash))
 
+    def test_blank_environment_writes_the_stand_grid_and_pins(self) -> None:
+        import os
+        from unittest.mock import patch
+
+        from dockbot.config import load_settings
+        from dockbot.configure import apply_configuration
+
+        self._wipe()
+        blank = {
+            "BOT_TOKEN": "test-token",
+            "DATABASE_URL": "postgresql+psycopg://dockbot@127.0.0.1:5432/dockbot",
+            "WAREHOUSE_TIMEZONE": "",
+            "WAREHOUSE_LATITUDE": "",
+            "WAREHOUSE_LONGITUDE": "",
+            "CANCEL_WINDOW_HOURS": "",
+            "GATES": "",
+            "GATE_WEEKDAYS": "",
+            "GATE_OPEN": "",
+            "GATE_CLOSE": "",
+            "SLOT_MINUTES": "",
+            "STAFF": "",
+        }
+        with patch.dict(os.environ, blank, clear=False):
+            settings = load_settings()
+        apply_configuration(ENGINE, settings)
+        ensure_stand_staff(ENGINE)
+        with Session(ENGINE) as session:
+            row = session.get(SiteSettings, 1)
+            assert row is not None
+            self.assertEqual(row.time_zone, "Europe/Moscow")
+            self.assertEqual(row.cancel_window_hours, 2)
+            self.assertIsNone(row.latitude)
+            self.assertIsNone(row.longitude)
+            gates = session.scalars(select(Gate).order_by(Gate.code)).all()
+            self.assertEqual([gate.code for gate in gates], ["1", "2"])
+            hours = session.scalars(select(GateHour)).all()
+            self.assertEqual(len(hours), 10)
+            for hour in hours:
+                self.assertIn(hour.weekday, (1, 2, 3, 4, 5))
+                self.assertEqual(hour.start_time, time(8, 0))
+                self.assertEqual(hour.end_time, time(18, 0))
+                self.assertEqual(hour.slot_minutes, 60)
+            pins = {
+                person.role: person.pin_hash
+                for person in session.scalars(select(StaffUser)).all()
+            }
+        self.assertTrue(verify_pin("1111", pins[StaffRole.security]))
+        self.assertTrue(verify_pin("2222", pins[StaffRole.warehouse]))
+        self.assertTrue(verify_pin("3333", pins[StaffRole.admin]))
+
     def test_closed_slot_is_not_bookable_and_busy_slot_stays_open(self) -> None:
         self._staff(pin="3333", telegram_id=STAFF_TG, name="Администратор", role=StaffRole.admin)
         start = _at(TOMORROW, 9)
@@ -1165,9 +1230,13 @@ class StaffTests(unittest.TestCase):
         warehouse = [item.label for item in actions_for(ENGINE, arrived, StaffRole.warehouse)]
         admin = [item.label for item in actions_for(ENGINE, arrived, StaffRole.admin)]
         self.assertEqual(guard, [])
-        self.assertTrue(all(label.startswith("На воротах") for label in warehouse))
+        self.assertTrue(warehouse[0].startswith("На воротах"))
         self.assertIn(" 0", warehouse[0])
+        self.assertIn("Очередь", warehouse)
+        self.assertIn("Начать разгрузку", warehouse)
+        self.assertNotIn("Разгружен", warehouse)
         self.assertTrue(any(label.startswith("На воротах") for label in admin))
+        self.assertIn("Очередь", admin)
         unloading = apply_mark(
             ENGINE, WAREHOUSE_TG, trip.id, BookingStatus.unloading, now=NOW
         )
@@ -1175,10 +1244,13 @@ class StaffTests(unittest.TestCase):
             [item.label for item in actions_for(ENGINE, unloading, StaffRole.security)],
             [],
         )
-        self.assertEqual(
-            [item.label for item in actions_for(ENGINE, unloading, StaffRole.warehouse)],
-            ["Разгружен"],
-        )
+        unloading_labels = [
+            item.label for item in actions_for(ENGINE, unloading, StaffRole.warehouse)
+        ]
+        self.assertEqual(unloading_labels[0], "Разгружен")
+        self.assertIn("Очередь", unloading_labels)
+        self.assertIn("Пауза", unloading_labels)
+        self.assertNotIn("Начать разгрузку", unloading_labels)
         done = apply_mark(ENGINE, WAREHOUSE_TG, trip.id, BookingStatus.completed, now=NOW)
         self.assertEqual(
             [item.label for item in actions_for(ENGINE, done, StaffRole.security)],
@@ -1203,6 +1275,7 @@ class StaffTests(unittest.TestCase):
         assert note is not None
         self.assertIn("Впереди на этих воротах: 1", note)
         self.assertNotIn(first.plate, note)
+        self.assertIn("Следующий: Паллеты, ждёт", note)
         self.assertIn("Разгрузка ещё не началась", note)
         self.assertIn("План:", note)
         waiting = self._insert(
@@ -1364,10 +1437,9 @@ class StaffTests(unittest.TestCase):
         self.assertIn("6 т", line)
         self.assertIn("75 мин", line)
         self.assertIn("Паллеты, 6 т, 75 мин", card)
-        self.assertIn(
-            "Разгрузка: база 60 мин, масса +15 мин, итого 75 мин, потолок 240",
-            card,
-        )
+        formula = "Разгрузка: база 60 мин, масса +15 мин, итого 75 мин, потолок 240"
+        self.assertEqual(card.count(formula), 1)
+        self.assertEqual(trip_line(heavy, ZONE).count(formula), 0)
 
     def test_document_check_stores_photo_and_guard_can_refuse(self) -> None:
         self._staff(pin="1111", telegram_id=STAFF_TG)
@@ -1487,6 +1559,131 @@ class StaffTests(unittest.TestCase):
         finally:
             for name in names:
                 discard_document(name)
+
+    def test_warehouse_yard_queue_pause_fact_photo_and_close(self) -> None:
+        self._staff(pin="2468", telegram_id=STAFF_TG)
+        self._warehouse()
+        self._staff(pin="3333", telegram_id=OTHER_TG, name="Администратор", role=StaffRole.admin)
+        trip = create_booking(
+            ENGINE,
+            gate_id=self.gate_a,
+            slot_start=_at(TOMORROW, 8),
+            plate="A100AA77",
+            make="КАМАЗ",
+            driver_name="Иванов Иван Иванович",
+            cargo_type="Паллеты",
+            telegram_id=DRIVER,
+            chat_id=DRIVER,
+            now=NOW,
+            weight_kg=1000,
+            place_count=10,
+        )
+        other = self._create(
+            _at(TOMORROW, 9), telegram_id=DRIVER + 4, plate="B200BB77"
+        )
+        arrived = apply_mark(ENGINE, STAFF_TG, trip.id, BookingStatus.arrived, now=NOW)
+        apply_mark(ENGINE, STAFF_TG, other.id, BookingStatus.arrived, now=NOW)
+        with self.assertRaises(AccessDenied):
+            queue_for_trip(ENGINE, STAFF_TG, trip.id, now=NOW)
+        yard = queue_for_trip(ENGINE, WAREHOUSE_TG, trip.id, now=NOW)
+        self.assertIn(trip.plate, yard)
+        self.assertIn(other.plate, yard)
+        self.assertIn("Паллеты", yard)
+        self.assertIn("Коробки", yard)
+        self.assertIn("Следующий:", yard)
+        driver = queue_note(ENGINE, arrived)
+        assert driver is not None
+        self.assertNotIn(other.plate, driver)
+        self.assertIn("Следующий: Коробки, ждёт", driver)
+
+        with self.assertRaises(AccessDenied):
+            set_pause(ENGINE, STAFF_TG, trip.id, "gate", now=NOW)
+        paused = set_pause(ENGINE, WAREHOUSE_TG, trip.id, "gate", now=NOW)
+        with self.assertRaises(YardError):
+            assert_can_close(ENGINE, WAREHOUSE_TG, trip.id)
+        self.assertEqual(paused.pause_reason, "gate")
+        self.assertIn("Пауза: ворота заняты", card_text(paused, ZONE, None))
+        self.assertIn("Пауза: ворота заняты", pass_caption(paused, ZONE))
+        self.assertIn("пауза, ворота заняты", trip_line(paused, ZONE))
+        with self.assertRaises(UnloadPaused):
+            apply_mark(
+                ENGINE, WAREHOUSE_TG, trip.id, BookingStatus.unloading, now=NOW
+            )
+        with self.assertRaises(YardError):
+            start_unload(ENGINE, WAREHOUSE_TG, trip.id, now=NOW)
+        self.assertEqual(self._status(trip.id), BookingStatus.arrived)
+        labels = [item.label for item in actions_for(ENGINE, paused, StaffRole.warehouse)]
+        self.assertIn("Продолжить", labels)
+        self.assertNotIn("Начать разгрузку", labels)
+        self.assertNotIn("Продолжить", [item.label for item in actions_for(ENGINE, paused, StaffRole.security)])
+        resumed = resume_unload(ENGINE, WAREHOUSE_TG, trip.id, now=NOW)
+        self.assertIsNone(resumed.pause_reason)
+        started = start_unload(ENGINE, WAREHOUSE_TG, trip.id, now=NOW)
+        self.assertEqual(started.status, BookingStatus.unloading)
+        cargo_pause = set_pause(ENGINE, WAREHOUSE_TG, trip.id, "cargo", now=NOW)
+        self.assertIn("пауза, груз не готов", trip_line(cargo_pause, ZONE))
+        self.assertIn("Пауза: груз не готов", pass_caption(cargo_pause, ZONE))
+        resume_unload(ENGINE, WAREHOUSE_TG, trip.id, now=NOW)
+
+        recorded = record_fact(
+            ENGINE, WAREHOUSE_TG, trip.id, "weight", "12 т", now=NOW
+        )
+        self.assertEqual(recorded.fact_kind, "weight")
+        self.assertEqual(recorded.fact_value, "12 т")
+        self.assertIn("Расхождение: другой вес, факт 12 т", card_text(recorded, ZONE, None))
+        self.assertIn("Расхождение: другой вес, факт 12 т", pass_caption(recorded, ZONE))
+
+        with self.assertRaises(YardError):
+            mark_damage(ENGINE, WAREHOUSE_TG, trip.id, now=NOW)
+        self.assertFalse(self._column(trip.id, "pallet_damage"))
+        photo = save_unload_photo(ENGINE, WAREHOUSE_TG, trip.id, _paper("разгрузка"))
+        path = document_path(photo.unload_photo)
+        assert path is not None
+        self.assertTrue(path.is_file())
+        damaged = mark_damage(ENGINE, WAREHOUSE_TG, trip.id, now=NOW)
+        self.assertTrue(damaged.pallet_damage)
+        self.assertIn("Повреждение паллет.", card_text(damaged, ZONE, None))
+        self.assertIn(
+            "Повреждение",
+            [item.label for item in actions_for(ENGINE, damaged, StaffRole.warehouse)],
+        )
+        discard_document(photo.unload_photo)
+
+        with self.assertRaises(CloseMismatch) as mismatch:
+            close_unload(
+                ENGINE,
+                WAREHOUSE_TG,
+                trip.id,
+                plate="В200ВВ77",
+                cargo="Коробки",
+                weight_text="5",
+                places_text="3",
+                now=NOW,
+            )
+        self.assertEqual(self._status(trip.id), BookingStatus.unloading)
+        self.assertIn("госномер", str(mismatch.exception))
+        self.assertIn("тип груза", str(mismatch.exception))
+        self.assertIn("вес", str(mismatch.exception))
+        self.assertIn("число мест", str(mismatch.exception))
+        self.assertIn("Рейс не закрыт", str(mismatch.exception))
+        closed = close_unload(
+            ENGINE,
+            WAREHOUSE_TG,
+            trip.id,
+            plate="А100АА77",
+            cargo="паллеты",
+            weight_text="1",
+            places_text="10",
+            now=NOW,
+        )
+        self.assertEqual(closed.status, BookingStatus.completed)
+        self.assertEqual(
+            [item.id for item in list_closed_today(ENGINE, DRIVER, DRIVER, now=NOW)],
+            [trip.id],
+        )
+        self.assertIn("Рейс закрыт.", pass_caption(closed, ZONE))
+        self.assertIn("Рейс закрыт.", card_text(closed, ZONE, None))
+        self.assertIn("Мест: 10", card_text(closed, ZONE, None))
 
     def _wipe(self) -> None:
         with Session(ENGINE) as session:

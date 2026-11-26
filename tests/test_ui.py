@@ -14,7 +14,7 @@ from dockbot.booking import (
     normalize_plate,
     slot_has_passed,
 )
-from dockbot.bot.keyboard import button_labels, keyboard_for
+from dockbot.bot.keyboard import button_labels, help_text, keyboard_for
 from dockbot.bot.ui import (
     back_menu_markup,
     cancel_step_markup,
@@ -29,10 +29,9 @@ from dockbot.bot.ui import (
     vehicle_markup,
     weight_markup,
 )
-from dockbot.models import BookingStatus, StaffRole
+from dockbot.models import BookingStatus, NotificationKind, StaffRole
 from dockbot.present import day_button, trip_button
 from dockbot.reminders import late_text, reminder_text
-from dockbot.models import NotificationKind
 from dockbot.shiftboard import filter_shift
 
 ZONE = ZoneInfo("Europe/Moscow")
@@ -132,6 +131,23 @@ class ScreenTests(unittest.TestCase):
             for button in row
         ])
         self.assertIn("Назад", labels)
+
+    def test_help_lists_only_real_commands(self) -> None:
+        shared = ("/start — открыть меню", "/menu — вернуться в меню", "/help — показать справку", "/cancel — сбросить диалог")
+        driver = help_text(None)
+        for line in shared:
+            self.assertIn(line, driver)
+        self.assertIn("/staff — войти по PIN сотрудника", driver)
+        self.assertIn("/logout — выйти из роли", driver)
+        self.assertNotIn("/logout — выйти в меню водителя", driver)
+        for role in (StaffRole.security, StaffRole.warehouse, StaffRole.admin):
+            text = help_text(role)
+            for line in shared:
+                self.assertIn(line, text)
+            self.assertIn("/staff — открыть меню сотрудника", text)
+            self.assertIn("/logout — выйти в меню водителя", text)
+            self.assertNotIn("/book", text)
+            self.assertNotIn("/geo", text)
 
     def test_shift_filters_and_reminder_copy(self) -> None:
         trips = [

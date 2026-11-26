@@ -40,6 +40,26 @@ def checkpoint_actions(trip: Trip) -> tuple[ShiftAction, ...]:
     )
 
 
+def yard_actions(trip: Trip) -> tuple[ShiftAction, ...]:
+    """Кнопки склада. Охрана их не получает."""
+    if trip.status not in {BookingStatus.arrived, BookingStatus.unloading}:
+        return ()
+    actions = [ShiftAction(trip.status, "Очередь", f"wh:queue:{trip.id}")]
+    if trip.pause_reason:
+        actions.append(ShiftAction(trip.status, "Продолжить", f"wh:resume:{trip.id}"))
+    else:
+        if trip.status is BookingStatus.arrived:
+            actions.append(
+                ShiftAction(trip.status, "Начать разгрузку", f"wh:start:{trip.id}")
+            )
+        actions.append(ShiftAction(trip.status, "Пауза", f"wh:pause:{trip.id}"))
+    actions.append(ShiftAction(trip.status, "Расхождение", f"wh:fact:{trip.id}"))
+    actions.append(ShiftAction(trip.status, "Фото разгрузки", f"wh:photo:{trip.id}"))
+    if trip.unload_photo:
+        actions.append(ShiftAction(trip.status, "Повреждение", f"wh:damage:{trip.id}"))
+    return tuple(actions)
+
+
 def row_actions(trip: Trip) -> tuple[ShiftAction, ...]:
     target = allowed_next(trip.status)
     if target == BookingStatus.unloading:
@@ -66,6 +86,10 @@ def trip_line(trip: Trip, zone: ZoneInfo) -> str:
         )
     if trip.overrun:
         marks.append("дольше окна")
+    if trip.pause_reason == "gate":
+        marks.append("пауза, ворота заняты")
+    elif trip.pause_reason == "cargo":
+        marks.append("пауза, груз не готов")
     if marks:
         line = f"{line} {' '.join(marks)}"
     return line
@@ -83,6 +107,7 @@ def actions_for(
     if role in {StaffRole.warehouse, StaffRole.admin}:
         actions.extend(_gate_actions(engine, trip))
         actions.extend(row_actions(trip) if trip.status == BookingStatus.unloading else ())
+        actions.extend(yard_actions(trip))
     if (
         role in {StaffRole.security, StaffRole.admin}
         and trip.doc_result == "mismatch"

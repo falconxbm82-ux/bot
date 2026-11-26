@@ -12,7 +12,7 @@ import math
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import func, select
@@ -48,6 +48,7 @@ from dockbot.models import (
 )
 from dockbot.roster import (
     LIGHT_NORMS,
+    NAME_MISMATCH,
     NOT_LISTED,
     STAND_DRIVERS,
     matches,
@@ -170,6 +171,12 @@ class Trip:
     unload_cut: int | None = None
     unload_total: int | None = None
     unload_cap: int | None = None
+    place_count: int | None = None
+    pause_reason: str | None = None
+    fact_kind: str | None = None
+    fact_value: str | None = None
+    unload_photo: str | None = None
+    pallet_damage: bool = False
 
 
 @dataclass(frozen=True)
@@ -227,6 +234,22 @@ def clean_driver_name(raw: str) -> FieldValue:
     if len(value) > DRIVER_NAME_MAX:
         raise FieldError(f"ФИО длиннее {DRIVER_NAME_MAX} символов.")
     return FieldValue(value)
+
+
+def _checked_places(value: int | None) -> int | None:
+    if value is None:
+        return None
+    if not isinstance(value, int) or isinstance(value, bool) or not 1 <= value <= 500:
+        raise FieldError("Укажите целое число мест от 1 до 500.")
+    return value
+
+
+def clean_places(raw: str) -> int:
+    """Целое число мест на рейсе, от 1 до 500."""
+    text = raw.strip()
+    if not text.isdigit() or not 1 <= int(text) <= 500:
+        raise FieldError("Укажите целое число мест от 1 до 500.")
+    return int(text)
 
 
 def clean_weight_tons(raw: str, vehicle: str = "heavy") -> int:
@@ -318,6 +341,32 @@ def list_live(
                 Booking.driver_telegram_id == telegram_id,
                 Booking.driver_chat_id == chat_id,
                 Booking.status.in_(OCCUPYING_STATUSES),
+            )
+            .order_by(Booking.slot_start, Booking.id)
+        ).all()
+        return [_trip(session, row) for row in rows]
+
+
+def list_closed_today(
+    engine: Engine,
+    telegram_id: int,
+    chat_id: int,
+    now: datetime | None = None,
+) -> list[Trip]:
+    """Закрытые сегодня рейсы. Водитель видит, что рейс уже разгружен."""
+    moment = now or datetime.now(timezone.utc)
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    with Session(engine) as session:
+        zone = _load_warehouse(session).zone
+        start = datetime.combine(moment.astimezone(zone).date(), time.min, tzinfo=zone)
+        rows = session.scalars(
+            select(Booking)
+            .where(
+                Booking.driver_telegram_id == telegram_id,
+                Booking.driver_chat_id == chat_id,
+                Booking.status == BookingStatus.completed,
+                Booking.slot_start >= start,
             )
             .order_by(Booking.slot_start, Booking.id)
         ).all()
@@ -439,6 +488,7 @@ def create_booking(
     doc_file_id: str | None = None,
     doc_name: str | None = None,
     doc_result: str | None = None,
+    place_count: int | None = None,
 ) -> Trip:
     moment = _aware(now)
     plate_value = normalize_plate(plate)
@@ -447,8 +497,10 @@ def create_booking(
     cargo_value = clean_cargo(cargo_type).value
     kind = _vehicle(vehicle)
     checked_weight = _checked_weight(weight_kg, kind)
-    if not driver_known(engine, plate_value, name_value):
-        raise BookingError(NOT_LISTED)
+    checked_places = _checked_places(place_count)
+    problem = roster_problem(engine, plate_value, name_value)
+    if problem is not None:
+        raise BookingError(problem)
     if doc_result == MISMATCH:
         raise BookingError("Данные не сходятся. Запись не завершена.")
     checked_doc = _checked_document(doc_file_id, doc_name, doc_result)
@@ -473,6 +525,7 @@ def create_booking(
                         doc_file_id=checked_doc[0],
                         doc_name=checked_doc[1],
                         doc_result=checked_doc[2],
+                        place_count=checked_places,
                     )
             _changed(trip.id)
             return trip
@@ -673,8 +726,9 @@ def update_vehicle(
                 raise WindowClosed(reason)
             if reason is not None:
                 raise NotEditable(reason)
-            if not driver_known(engine, plate_value, name_value):
-                raise BookingError(NOT_LISTED)
+            problem = roster_problem(engine, plate_value, name_value)
+            if problem is not None:
+                raise BookingError(problem)
             _reject_same_day(
                 session,
                 warehouse.zone,
@@ -729,8 +783,9 @@ def staff_update_party(
                 raise WindowClosed(reason)
             if reason is not None:
                 raise NotEditable(reason)
-            if not driver_known(engine, plate_value, name_value):
-                raise BookingError(NOT_LISTED)
+            problem = roster_problem(engine, plate_value, name_value)
+            if problem is not None:
+                raise BookingError(problem)
             _reject_same_day(
                 session,
                 warehouse.zone,
@@ -834,6 +889,16 @@ def queue_note(engine: Engine, trip: Trip) -> str | None:
             )
             .order_by(BookingStatusEvent.id.desc())
         )
+        others = session.scalars(
+            select(Booking)
+            .where(
+                Booking.gate_id == trip.gate_id,
+                Booking.id != trip.id,
+                Booking.status.in_((BookingStatus.arrived, BookingStatus.unloading)),
+            )
+            .order_by(Booking.slot_start, Booking.id)
+        ).all()
+        queue = [(row.cargo_type, _driver_wait(session, row)) for row in others]
     planned = trip.slot_start.astimezone(warehouse.zone).strftime("%H:%M")
     lines = [
         f"План: {planned} мск",
@@ -843,7 +908,30 @@ def queue_note(engine: Engine, trip: Trip) -> str | None:
         lines.append("Разгрузка ещё не началась.")
     else:
         lines.append(f"Факт: {actual.astimezone(warehouse.zone).strftime('%H:%M')} мск")
+    for index, (cargo, wait) in enumerate(queue):
+        title = "Следующий" if index == 0 else str(index + 1)
+        lines.append(f"{title}: {cargo}, {wait}")
     return "\n".join(lines)
+
+
+def _driver_wait(session: Session, booking: Booking) -> str:
+    moment = booking.arrived_at
+    if moment is None:
+        moment = session.scalar(
+            select(BookingStatusEvent.created_at)
+            .where(
+                BookingStatusEvent.booking_id == booking.id,
+                BookingStatusEvent.to_status == BookingStatus.arrived,
+                BookingStatusEvent.note.is_(None),
+            )
+            .order_by(BookingStatusEvent.id.desc())
+        )
+    if moment is None:
+        return "ждёт меньше минуты"
+    minutes = max(0, int((datetime.now(timezone.utc) - moment).total_seconds() // 60))
+    if minutes == 0:
+        return "ждёт меньше минуты"
+    return f"ждёт {minutes} мин"
 
 
 def booking_profile(
@@ -910,19 +998,49 @@ def known_driver_rows(engine: Engine) -> list[tuple[str, str]]:
     return [(row.driver_name, row.plate) for row in rows]
 
 
-def driver_known(engine: Engine, plate: str, name: str) -> bool:
-    """Пара ФИО и госномер есть в базе стенда."""
+def roster_problem(engine: Engine, plate: str, name: str) -> str | None:
+    """None, если пара в списке. Иначе короткая причина для водителя."""
     plate_value = normalize_plate(plate)
     name_value = clean_driver_name(name).value
     with Session(engine) as session:
         rows = session.execute(
             select(KnownDriver.driver_name, KnownDriver.plate)
         ).all()
-    source = rows or STAND_DRIVERS
-    return any(
-        matches(plate_value, name_value, row_name, row_plate)
-        for row_name, row_plate in source
-    )
+    return _roster_problem(plate_value, name_value, rows or STAND_DRIVERS)
+
+
+def driver_known(engine: Engine, plate: str, name: str) -> bool:
+    """Пара ФИО и госномер есть в базе стенда."""
+    return roster_problem(engine, plate, name) is None
+
+
+def _roster_plate(raw: str) -> str:
+    """Латинские двойники B/В и C/С считаются тем же номером, что в списке."""
+    try:
+        return normalize_plate(raw)
+    except FieldError:
+        return "".join(raw.upper().split()).translate(_PLATE_LATIN)
+
+
+def _roster_problem(
+    plate_value: str, name_value: str, source: list[tuple[str, str]] | tuple
+) -> str | None:
+    folded = _name_key(name_value)
+    plate_known = False
+    name_on_other = False
+    for row_name, row_plate in source:
+        roster_plate = _roster_plate(str(row_plate))
+        same_plate = roster_plate == plate_value
+        same_name = _name_key(str(row_name)) == folded
+        if matches(plate_value, name_value, str(row_name), roster_plate):
+            return None
+        if same_plate:
+            plate_known = True
+        elif same_name:
+            name_on_other = True
+    if plate_known and name_on_other:
+        return NAME_MISMATCH
+    return NOT_LISTED
 
 
 def pair_booked_on(
@@ -1015,6 +1133,7 @@ def _insert_booking(
     doc_file_id: str | None = None,
     doc_name: str | None = None,
     doc_result: str | None = None,
+    place_count: int | None = None,
 ) -> Trip:
     warehouse = _load_warehouse(session)
     session.get(Gate, gate_id, with_for_update=True)
@@ -1060,6 +1179,7 @@ def _insert_booking(
         doc_file_id=doc_file_id,
         doc_name=doc_name,
         doc_result=doc_result,
+        place_count=place_count,
         driver_telegram_id=telegram_id,
         driver_chat_id=chat_id,
         status=status,
@@ -1626,6 +1746,12 @@ def _trip(session: Session, booking: Booking) -> Trip:
         unload_cut=parts.cut if parts is not None else None,
         unload_total=parts.total if parts is not None else None,
         unload_cap=parts.cap if parts is not None else None,
+        place_count=booking.place_count,
+        pause_reason=booking.pause_reason,
+        fact_kind=booking.fact_kind,
+        fact_value=booking.fact_value,
+        unload_photo=booking.unload_photo,
+        pallet_damage=bool(booking.pallet_damage),
     )
 
 

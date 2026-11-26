@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import logging
+import os
 import subprocess
 import tempfile
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, time, timezone
 from pathlib import Path
+from unittest.mock import patch
+
+from dockbot.config import ConfigError, load_settings
 
 from dockbot.backup import (
     KEEP_COPIES,
@@ -22,6 +26,61 @@ from dockbot.logging_setup import (
     resolve_log_directory,
     setup_logging,
 )
+
+
+class BlankEnvironmentTests(unittest.TestCase):
+    def test_empty_optional_keys_take_the_stand_and_skip_reminders(self) -> None:
+        blank = {
+            "BOT_TOKEN": "test-token",
+            "DATABASE_URL": "postgresql+psycopg://dockbot@127.0.0.1:5432/dockbot",
+            "WAREHOUSE_TIMEZONE": "",
+            "WAREHOUSE_LATITUDE": "",
+            "WAREHOUSE_LONGITUDE": "",
+            "CANCEL_WINDOW_HOURS": "",
+            "GATES": "",
+            "GATE_WEEKDAYS": "",
+            "GATE_OPEN": "",
+            "GATE_CLOSE": "",
+            "SLOT_MINUTES": "",
+            "STAFF": "",
+            "LOG_DIR": "",
+            "BACKUP_DIR": "",
+        }
+        with patch.dict(os.environ, blank, clear=False):
+            settings = load_settings()
+        settings.require_bot()
+        self.assertEqual(settings.time_zone, "Europe/Moscow")
+        self.assertEqual(settings.cancel_window_hours, 2)
+        self.assertEqual(settings.gates, (("1", "Ворота 1"), ("2", "Ворота 2")))
+        self.assertEqual(settings.weekdays, (1, 2, 3, 4, 5))
+        self.assertEqual(settings.gate_open, time(8, 0))
+        self.assertEqual(settings.gate_close, time(18, 0))
+        self.assertEqual(settings.slot_minutes, 60)
+        self.assertIsNone(settings.latitude)
+        self.assertIsNone(settings.longitude)
+        self.assertEqual(settings.staff, ())
+        self.assertFalse(settings.site_is_complete)
+        with self.assertRaises(ConfigError):
+            settings.require_site()
+
+    def test_one_coordinate_still_needs_its_pair(self) -> None:
+        blank = {
+            "BOT_TOKEN": "test-token",
+            "DATABASE_URL": "postgresql+psycopg://dockbot@127.0.0.1:5432/dockbot",
+            "WAREHOUSE_TIMEZONE": "",
+            "WAREHOUSE_LATITUDE": "55.75",
+            "WAREHOUSE_LONGITUDE": "",
+            "CANCEL_WINDOW_HOURS": "",
+            "GATES": "",
+            "GATE_WEEKDAYS": "",
+            "GATE_OPEN": "",
+            "GATE_CLOSE": "",
+            "SLOT_MINUTES": "45",
+            "STAFF": "",
+        }
+        with patch.dict(os.environ, blank, clear=False):
+            with self.assertRaises(ConfigError):
+                load_settings()
 
 
 class LogDirectoryTests(unittest.TestCase):

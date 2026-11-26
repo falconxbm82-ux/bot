@@ -16,6 +16,7 @@ from dockbot.booking import (
     DAY_TAKEN,
     HEAVY_CARGOS,
     LIGHT_CARGOS,
+    NAME_MISMATCH,
     NOT_LISTED,
     BookingError,
     FieldError,
@@ -24,10 +25,11 @@ from dockbot.booking import (
     available_dates,
     clean_cargo,
     clean_driver_name,
+    clean_places,
     clean_make,
     clean_weight_tons,
     create_booking,
-    driver_known,
+    roster_problem,
     gates_with_slots,
     load_zone,
     normalize_plate,
@@ -38,12 +40,14 @@ from dockbot.booking import (
 )
 from dockbot.bot.keyboard import keyboard_for
 from dockbot.bot.ui import (
+    BACK,
     CARGO_LABELS,
     CARGO_PREFIX,
     DATE_PREFIX,
     GATE_PREFIX,
     SLOT_PREFIX,
     actor_ids,
+    back_menu_markup,
     cargo_markup,
     dates_markup,
     gates_markup,
@@ -68,6 +72,7 @@ class DeskFlow(StatesGroup):
     cargo_note = State()
     weight = State()
     weight_note = State()
+    places = State()
     date = State()
     gate = State()
     slot = State()
@@ -151,7 +156,7 @@ async def desk_weight(query: CallbackQuery, state: FSMContext, engine: Engine) -
         await query.answer("Кнопка устарела", show_alert=True)
         return
     await state.update_data(weight_kg=int(raw))
-    await _dates(query, state, engine)
+    await _ask_places(query, state)
 
 
 @router.message(DeskFlow.weight_note, F.text)
@@ -163,7 +168,7 @@ async def desk_weight_note(message: Message, state: FSMContext, engine: Engine) 
         await message.answer(str(exc))
         return
     await state.update_data(weight_kg=weight_kg)
-    await _dates(message, state, engine)
+    await _ask_places(message, state)
 
 
 @router.callback_query(DeskFlow.date, F.data.startswith(DATE_PREFIX))
@@ -197,6 +202,20 @@ async def desk_slot(query: CallbackQuery, state: FSMContext) -> None:
     await state.update_data(slot_ts=int(raw))
     await state.set_state(DeskFlow.plate)
     await reply(query, "Госномер, например А123ВС178.", menu_markup())
+
+
+@router.callback_query(DeskFlow.gate, F.data == BACK)
+async def desk_back_to_dates(
+    query: CallbackQuery, state: FSMContext, engine: Engine
+) -> None:
+    await _dates(query, state, engine)
+
+
+@router.callback_query(DeskFlow.slot, F.data == BACK)
+async def desk_back_to_gates(
+    query: CallbackQuery, state: FSMContext, engine: Engine
+) -> None:
+    await _gates(query, state, engine)
 
 
 @router.message(DeskFlow.plate, F.text)
@@ -236,11 +255,14 @@ async def desk_name(message: Message, state: FSMContext, engine: Engine) -> None
     data = await state.get_data()
     plate = data.get("plate") or ""
     try:
-        known = await asyncio.to_thread(driver_known, engine, plate, field.value)
+        problem = await asyncio.to_thread(roster_problem, engine, plate, field.value)
     except FieldError as exc:
         await message.answer(str(exc))
         return
-    if not known:
+    if problem == NAME_MISMATCH:
+        await message.answer(NAME_MISMATCH)
+        return
+    if problem:
         await state.set_state(DeskFlow.plate)
         await message.answer(f"{NOT_LISTED}\nГосномер, например А123ВС178.")
         return
@@ -276,6 +298,7 @@ async def desk_name(message: Message, state: FSMContext, engine: Engine) -> None
             chat_id=None,
             vehicle=data.get("vehicle") or "heavy",
             weight_kg=data.get("weight_kg"),
+            place_count=data.get("places"),
         )
     except SlotTaken as exc:
         await message.answer(str(exc))
@@ -301,6 +324,25 @@ async def desk_name(message: Message, state: FSMContext, engine: Engine) -> None
         caption=pass_caption(trip, zone) + "\n" + _NOTE,
     )
     await message.answer(_NOTE, reply_markup=keyboard_for(StaffRole.admin))
+
+
+async def _ask_places(event: Message | CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(DeskFlow.places)
+    if isinstance(event, Message):
+        await event.answer("Число мест.")
+        return
+    await reply(event, "Число мест.", menu_markup())
+
+
+@router.message(DeskFlow.places, F.text)
+async def desk_places(message: Message, state: FSMContext, engine: Engine) -> None:
+    try:
+        count = clean_places(message.text or "")
+    except FieldError as exc:
+        await message.answer(str(exc))
+        return
+    await state.update_data(places=count)
+    await _dates(message, state, engine)
 
 
 async def _dates(event, state: FSMContext, engine: Engine) -> None:
@@ -346,7 +388,7 @@ async def _gates(event, state: FSMContext, engine: Engine) -> None:
     )
     await state.set_state(DeskFlow.gate)
     if not gates:
-        await reply(event, "Свободных ворот нет. Вернитесь к дате.", menu_markup())
+        await reply(event, "Свободных ворот нет. Вернитесь к дате.", back_menu_markup())
         return
     await reply(event, "Выберите ворота.", gates_markup(gates))
 
@@ -356,7 +398,7 @@ async def _slots(event, state: FSMContext, engine: Engine) -> None:
     choices, zone = await _choices(engine, data)
     await state.set_state(DeskFlow.slot)
     if not choices:
-        await reply(event, "Свободных окон нет. Выберите другие ворота.", menu_markup())
+        await reply(event, "Свободных окон нет. Выберите другие ворота.", back_menu_markup())
         return
     text = "Выберите окно."
     phrase = await _window(engine, data)

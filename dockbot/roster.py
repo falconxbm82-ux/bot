@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 NOT_LISTED = "Водителя нет в списке."
+NAME_MISMATCH = "ФИО не совпадает с этим номером."
 
 # ФИО ровно из трёх слов, госномер уже в кириллице.
 STAND_DRIVERS: tuple[tuple[str, str], ...] = (

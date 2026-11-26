@@ -204,6 +204,14 @@ class Booking(Base):
     doc_file_id: Mapped[str | None] = mapped_column(String(256))
     doc_name: Mapped[str | None] = mapped_column(String(64))
     doc_result: Mapped[str | None] = mapped_column(String(16))
+    place_count: Mapped[int | None] = mapped_column(Integer)
+    pause_reason: Mapped[str | None] = mapped_column(String(16))
+    fact_kind: Mapped[str | None] = mapped_column(String(16))
+    fact_value: Mapped[str | None] = mapped_column(String(200))
+    unload_photo: Mapped[str | None] = mapped_column(String(64))
+    pallet_damage: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
     status: Mapped[BookingStatus] = mapped_column(BOOKING_STATUS, nullable=False)
     pass_token: Mapped[str] = mapped_column(String(128), nullable=False, unique=True)
     pass_pin: Mapped[str] = mapped_column(String(16), nullable=False)
@@ -244,6 +252,22 @@ class Booking(Base):
         CheckConstraint(
             "doc_result IS NULL OR doc_result IN ('match', 'mismatch')",
             name="ck_bookings_doc_result",
+        ),
+        CheckConstraint(
+            "place_count IS NULL OR (place_count >= 1 AND place_count <= 500)",
+            name="ck_bookings_place_count",
+        ),
+        CheckConstraint(
+            "pause_reason IS NULL OR pause_reason IN ('gate', 'cargo')",
+            name="ck_bookings_pause_reason",
+        ),
+        CheckConstraint(
+            "fact_kind IS NULL OR fact_kind IN ('weight', 'cargo', 'places')",
+            name="ck_bookings_fact_kind",
+        ),
+        CheckConstraint(
+            "NOT pallet_damage OR unload_photo IS NOT NULL",
+            name="ck_bookings_pallet_damage",
         ),
         Index("ix_bookings_driver_slot", "driver_telegram_id", "slot_start"),
         Index("ix_bookings_slot_start", "slot_start"),
