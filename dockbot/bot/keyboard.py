@@ -32,6 +32,7 @@ GATES = "Ворота"
 SLOTS = "Слоты"
 STAFF_LIST = "Сотрудники"
 SETTINGS = "Параметры"
+DRIVERS = "Водители"
 DAY_SUMMARY = "Сводка дня"
 SEND_POINT = "Отправить геопозицию"
 
@@ -67,7 +68,12 @@ def keyboard_for(role: StaffRole | None) -> ReplyKeyboardMarkup:
     if role is StaffRole.warehouse:
         return _rows((MONITOR, WAITING), (ON_SITE, FINISHED), (HELP,))
     if role is StaffRole.admin:
-        return _rows((GATES, SLOTS), (STAFF_LIST, SETTINGS), (DAY_SUMMARY, HELP))
+        return _rows(
+            (GATES, SLOTS),
+            (STAFF_LIST, SETTINGS),
+            (DRIVERS, DAY_SUMMARY),
+            (HELP,),
+        )
     return _rows(
         (BOOK, MY_BOOKINGS),
         (MY_PASS, DIRECTIONS),
@@ -108,6 +114,7 @@ def help_text(role: StaffRole | None) -> str:
             "«Сотрудники» — PIN на 4 цифры, отзыв доступа.\n"
             "«Сводка дня» — статусы, опоздания, прибытия в срок и среднее время.\n"
             "Там же «Записать без чата», если водитель сам не открыл бота.\n"
+            "«Водители» — десять записей, которым открыта бронь.\n"
             "«Параметры» — окно отмены, опоздание, зазор, норма груза, шаг веса, адрес."
         )
     return (
@@ -117,7 +124,9 @@ def help_text(role: StaffRole | None) -> str:
         "«Мой пропуск» — QR и PIN.\n"
         "«Как проехать» — адрес и точка склада.\n"
         "«Отменить», «Перенести» и «Заменить машину» — пока до слота больше окна отмены.\n"
-        "Вес добавляет минуты к норме типа, потолок 240. После машины — фото документа.\n"
+        "Бронь только если ФИО и госномер есть в списке склада.\n"
+        "Вес добавляет минуты к норме типа, потолок 240. Малотоннажный короче.\n"
+        "После машины — фото документа.\n"
         "QR и PIN при замене не меняются.\n"
         "«Я сотрудник» — PIN из 4 цифр."
     )

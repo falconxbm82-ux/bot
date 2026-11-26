@@ -89,6 +89,38 @@ class ButtonTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(alerts, ["Кнопка устарела"])
         alerts = await self._alerts("bk:edit")
         self.assertEqual(alerts, ["Кнопка устарела"])
+        alerts = await self._alerts("bk:urgent:1")
+        self.assertEqual(alerts, ["Кнопка устарела"])
+
+    async def test_same_day_warning_comes_before_the_document(self) -> None:
+        from unittest.mock import patch
+
+        from dockbot.booking import DAY_TAKEN
+        from dockbot.roster import NOT_LISTED
+
+        stored = {
+            "mode": "create",
+            "date": "2026-11-15",
+            "plate": "А100АА77",
+            "cargo": "Паллеты",
+            "weight_kg": 1000,
+            "vehicle": "heavy",
+        }
+        with (
+            patch("dockbot.bot.wizard.driver_known", return_value=True),
+            patch("dockbot.bot.wizard.pair_booked_on", return_value=True),
+        ):
+            texts = await self._feed_text("Иванов Иван Иванович", BookFlow.driver_name, stored)
+        self.assertTrue(any(DAY_TAKEN in item for item in texts))
+        self.assertFalse(any("Фото документа" in item for item in texts))
+        self.assertEqual(await self._state(), BookFlow.plate.state)
+        with (
+            patch("dockbot.bot.wizard.driver_known", return_value=False),
+            patch("dockbot.bot.wizard.pair_booked_on", return_value=False),
+        ):
+            texts = await self._feed_text("Иванов Иван Иванович", BookFlow.driver_name, stored)
+        self.assertTrue(any(NOT_LISTED in item for item in texts))
+        self.assertEqual(await self._state(), BookFlow.plate.state)
 
     async def test_cancel_with_a_dialog_returns_the_role_keyboard(self) -> None:
         labels = await self._press(
@@ -137,6 +169,16 @@ class ButtonTests(unittest.IsolatedAsyncioTestCase):
             message=self.message,
         )
         await self._dispatch(Update(update_id=self._update_id, callback_query=query))
+
+    async def _feed_text(self, text: str, state, stored: dict) -> list[str]:
+        self._person = None
+        self.session.calls.clear()
+        key = self._key()
+        await self.dp.storage.set_state(key, state)
+        await self.dp.storage.set_data(key, stored)
+        message = self.message.model_copy(update={"text": text})
+        await self._dispatch(Update(update_id=self._update_id, message=message))
+        return [getattr(call, "text", "") or "" for call in self.session.calls]
 
     async def _feed_message(self, text: str, role=None, state=None) -> None:
         self._person = role

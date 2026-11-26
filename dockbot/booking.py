@@ -42,8 +42,15 @@ from dockbot.models import (
     ClosedSlot,
     Gate,
     GateHour,
+    KnownDriver,
     SiteSettings,
     StatusSource,
+)
+from dockbot.roster import (
+    LIGHT_NORMS,
+    NOT_LISTED,
+    STAND_DRIVERS,
+    matches,
 )
 from dockbot.passes import new_pin, new_token
 
@@ -59,8 +66,18 @@ PIN_CONSTRAINT = "uq_bookings_active_pass_pin"
 TOKEN_CONSTRAINT = "bookings_pass_token_key"
 WEIGHT_ADDON_MINUTES = 15
 DURATION_CAP_MINUTES = 240
+LIGHT_CAP_MINUTES = 120
 DEFAULT_WEIGHT_STEP_KG = 5000
 WEIGHT_MAX_KG = 40000
+LIGHT_MAX_KG = 5000
+HEAVY_CARGOS = (
+    ("pallets", "Паллеты"),
+    ("bulk", "Навал"),
+    ("liquid", "Жидкость"),
+    ("reefer", "Рефрижератор"),
+    ("other", "Другое"),
+)
+LIGHT_CARGOS = tuple((code, label) for code, label, _minutes in LIGHT_NORMS)
 
 
 class BookingError(Exception):
@@ -150,7 +167,9 @@ class Trip:
     doc_result: str | None = None
     unload_base: int | None = None
     unload_addon: int | None = None
+    unload_cut: int | None = None
     unload_total: int | None = None
+    unload_cap: int | None = None
 
 
 @dataclass(frozen=True)
@@ -210,31 +229,56 @@ def clean_driver_name(raw: str) -> FieldValue:
     return FieldValue(value)
 
 
-def clean_weight_tons(raw: str) -> int:
-    """Целые тонны от 1 до 40. В базе хранятся килограммы."""
+def clean_weight_tons(raw: str, vehicle: str = "heavy") -> int:
+    """Целые тонны. Обычная машина 1–40, малотоннажная 1–5. В базе килограммы."""
+    limit = 5 if vehicle == "light" else 40
     text = raw.strip().lower().replace("тонн", "").replace("т", "").strip()
     if not text.isdigit():
-        raise FieldError("Укажите целое число тонн от 1 до 40.")
+        raise FieldError(f"Укажите целое число тонн от 1 до {limit}.")
     tons = int(text)
-    if not 1 <= tons <= 40:
-        raise FieldError("Укажите целое число тонн от 1 до 40.")
+    if not 1 <= tons <= limit:
+        raise FieldError(f"Укажите целое число тонн от 1 до {limit}.")
     return tons * 1000
 
 
-def unload_parts(base: int, weight_kg: int, step_kg: int) -> tuple[int, int, int]:
-    """База типа груза, добавка массы и итог не выше потолка."""
+@dataclass(frozen=True)
+class UnloadQuote:
+    base: int
+    addon: int
+    cut: int
+    total: int
+    cap: int
+
+
+def unload_parts(
+    base: int, weight_kg: int, step_kg: int, vehicle: str = "heavy"
+) -> UnloadQuote:
+    """База типа, добавка массы и итог. Малотоннажный короче при тех же типе и массе."""
     step = step_kg if step_kg > 0 else DEFAULT_WEIGHT_STEP_KG
     if weight_kg <= 0:
         extra = 0
     else:
         extra = max(0, math.ceil(weight_kg / step) - 1) * WEIGHT_ADDON_MINUTES
-    total = min(DURATION_CAP_MINUTES, base + extra)
-    return base, extra, total
+    gross = base + extra
+    if vehicle == "light":
+        cap = LIGHT_CAP_MINUTES
+        cut = max(1, gross // 3)
+        total = min(cap, max(1, gross - cut))
+        heavy_total = min(DURATION_CAP_MINUTES, gross)
+        if total >= heavy_total and gross > 1:
+            total = min(cap, gross - 1)
+    else:
+        cap = DURATION_CAP_MINUTES
+        cut = 0
+        total = min(cap, gross)
+    return UnloadQuote(base, extra, cut, total, cap)
 
 
-def unload_minutes(base: int, weight_kg: int, step_kg: int) -> int:
-    """Норма типа плюс 15 мин за каждый шаг веса сверх первого. Потолок 240."""
-    return unload_parts(base, weight_kg, step_kg)[2]
+def unload_minutes(
+    base: int, weight_kg: int, step_kg: int, vehicle: str = "heavy"
+) -> int:
+    """Норма типа плюс 15 мин за каждый шаг веса сверх первого. У малотоннажного минус треть."""
+    return unload_parts(base, weight_kg, step_kg, vehicle).total
 
 
 def clean_cargo(raw: str) -> FieldValue:
@@ -288,7 +332,7 @@ def available_dates(
     moment = _aware(now)
     with Session(engine) as session:
         warehouse = _load_warehouse(session)
-        duration = _cargo_duration(session, cargo, weight_kg)
+        duration = _cargo_duration(session, cargo, weight_kg, vehicle)
         today = moment.astimezone(warehouse.zone).date()
         span_start = _day_start(today, warehouse.zone)
         span_end = _day_start(today + timedelta(days=HORIZON_DAYS), warehouse.zone)
@@ -317,7 +361,7 @@ def gates_with_slots(
     moment = _aware(now)
     with Session(engine) as session:
         warehouse = _load_warehouse(session)
-        duration = _cargo_duration(session, cargo, weight_kg)
+        duration = _cargo_duration(session, cargo, weight_kg, vehicle)
         span_start = _day_start(day, warehouse.zone)
         span_end = _day_start(day + timedelta(days=1), warehouse.zone)
         ranges = _occupied_ranges(session, span_start, span_end, ignore_booking_id)
@@ -348,7 +392,7 @@ def slots_for_gate(
     moment = _aware(now)
     with Session(engine) as session:
         warehouse = _load_warehouse(session)
-        duration = _cargo_duration(session, cargo, weight_kg)
+        duration = _cargo_duration(session, cargo, weight_kg, vehicle)
         span_start = _day_start(day, warehouse.zone)
         span_end = _day_start(day + timedelta(days=1), warehouse.zone)
         ranges = _occupied_ranges(session, span_start, span_end, ignore_booking_id)
@@ -393,7 +437,9 @@ def create_booking(
     name_value = clean_driver_name(driver_name).value
     cargo_value = clean_cargo(cargo_type).value
     kind = _vehicle(vehicle)
-    checked_weight = _checked_weight(weight_kg)
+    checked_weight = _checked_weight(weight_kg, kind)
+    if not driver_known(engine, plate_value, name_value):
+        raise BookingError(NOT_LISTED)
     if doc_result == MISMATCH:
         raise BookingError("Данные не сходятся. Запись не завершена.")
     checked_doc = _checked_document(doc_file_id, doc_name, doc_result)
@@ -522,7 +568,10 @@ def reschedule_booking(
                 if reason is not None:
                     raise NotEditable(reason)
                 duration = _cargo_duration(
-                    session, booking.cargo_type, booking.weight_kg
+                    session,
+                    booking.cargo_type,
+                    booking.weight_kg,
+                    booking.vehicle_kind,
                 )
                 cell = _fit_cell(warehouse, gate_id, slot_start, duration)
                 if cell is None or not cell.start > moment:
@@ -615,6 +664,8 @@ def update_vehicle(
                 raise WindowClosed(reason)
             if reason is not None:
                 raise NotEditable(reason)
+            if not driver_known(engine, plate_value, name_value):
+                raise BookingError(NOT_LISTED)
             _reject_same_day(
                 session,
                 warehouse.zone,
@@ -669,6 +720,8 @@ def staff_update_party(
                 raise WindowClosed(reason)
             if reason is not None:
                 raise NotEditable(reason)
+            if not driver_known(engine, plate_value, name_value):
+                raise BookingError(NOT_LISTED)
             _reject_same_day(
                 session,
                 warehouse.zone,
@@ -805,17 +858,113 @@ def weight_step_kg(engine: Engine) -> int:
         return _step_kg(session)
 
 
-def window_phrase(engine: Engine, cargo: str, weight_kg: int) -> str:
+def window_phrase(
+    engine: Engine, cargo: str, weight_kg: int, vehicle: str = "heavy"
+) -> str:
     """Текст до выбора слота: из чего сложились минуты окна."""
     with Session(engine) as session:
         base = _base_minutes(session, cargo)
         step = _step_kg(session)
     if base is None:
         return "Длину окна задают ворота. Вес к ней не добавляется."
-    base_minutes, extra, total = unload_parts(base, weight_kg, step)
+    quote = unload_parts(base, weight_kg, step, vehicle)
     from dockbot.present import unload_formula
 
-    return unload_formula(base_minutes, extra, total)
+    return unload_formula(
+        quote.base, quote.addon, quote.total, cut=quote.cut, cap=quote.cap
+    )
+
+
+def ensure_known_drivers(engine: Engine) -> list[tuple[str, str]]:
+    """Записывает десятку стенда, если строки ещё нет. Чужие строки не стирает."""
+    with Session(engine) as session:
+        with session.begin():
+            existing = {
+                row.driver_name: row
+                for row in session.scalars(select(KnownDriver)).all()
+            }
+            for name, plate in STAND_DRIVERS:
+                row = existing.get(name)
+                if row is None:
+                    session.add(KnownDriver(driver_name=name, plate=plate))
+                elif row.plate != plate:
+                    row.plate = plate
+    return list(STAND_DRIVERS)
+
+
+def known_driver_rows(engine: Engine) -> list[tuple[str, str]]:
+    ensure_known_drivers(engine)
+    with Session(engine) as session:
+        rows = session.scalars(
+            select(KnownDriver).order_by(KnownDriver.driver_name, KnownDriver.id)
+        ).all()
+    return [(row.driver_name, row.plate) for row in rows]
+
+
+def driver_known(engine: Engine, plate: str, name: str) -> bool:
+    """Пара ФИО и госномер есть в базе стенда."""
+    plate_value = normalize_plate(plate)
+    name_value = clean_driver_name(name).value
+    with Session(engine) as session:
+        rows = session.execute(
+            select(KnownDriver.driver_name, KnownDriver.plate)
+        ).all()
+    source = rows or STAND_DRIVERS
+    return any(
+        matches(plate_value, name_value, row_name, row_plate)
+        for row_name, row_plate in source
+    )
+
+
+def pair_booked_on(
+    engine: Engine,
+    day: date,
+    plate: str,
+    name: str,
+    *,
+    ignore_booking_id: int | None = None,
+) -> bool:
+    """Те же ФИО и тот же госномер уже в брони этого дня. Отмена не считается."""
+    plate_value = normalize_plate(plate)
+    name_value = clean_driver_name(name).value
+    with Session(engine) as session:
+        zone = _load_warehouse(session).zone
+        start = _day_start(day, zone)
+        end = _day_start(day + timedelta(days=1), zone)
+        rows = session.scalars(
+            select(Booking).where(
+                Booking.slot_start >= start,
+                Booking.slot_start < end,
+                Booking.status != BookingStatus.cancelled,
+            )
+        ).all()
+    for row in rows:
+        if ignore_booking_id is not None and row.id == ignore_booking_id:
+            continue
+        if _plate_key(row.plate) == plate_value and _name_key(row.driver_name) == _name_key(
+            name_value
+        ):
+            return True
+    return False
+
+
+def offered_cargos(engine: Engine, vehicle: str = "heavy") -> list[tuple[str, str, int]]:
+    """Кнопки груза. У малотоннажного другие типы и уже укороченные минуты."""
+    codes = LIGHT_CARGOS if vehicle == "light" else HEAVY_CARGOS
+    with Session(engine) as session:
+        rows = session.scalars(select(CargoNorm)).all()
+        step = _step_kg(session)
+    by_code = {row.code: row for row in rows}
+    found: list[tuple[str, str, int]] = []
+    for code, label in codes:
+        row = by_code.get(code)
+        if row is None:
+            continue
+        shown = int(row.minutes)
+        if vehicle == "light":
+            shown = unload_minutes(shown, 0, step, "light")
+        found.append((code, label if row.label == label else row.label, shown))
+    return found
 
 
 def listen_booking_changed(listener: Callable[[int], None]) -> Callable[[], None]:
@@ -864,7 +1013,7 @@ def _insert_booking(
         own = _own_row(session, gate_id, slot_start, telegram_id, chat_id)
         if own is not None:
             return _trip(session, own)
-    duration = _cargo_duration(session, cargo_type, weight_kg)
+    duration = _cargo_duration(session, cargo_type, weight_kg, vehicle)
     cell = _fit_cell(warehouse, gate_id, slot_start, duration)
     if cell is None or not cell.start > now:
         raise SlotTaken("Этот слот больше не доступен. Выберите другой.")
@@ -1073,14 +1222,18 @@ def _occupied_ranges(
 
 
 def _cargo_duration(
-    session: Session, cargo: str | None, weight_kg: int | None = None
+    session: Session,
+    cargo: str | None,
+    weight_kg: int | None = None,
+    vehicle: str | None = None,
 ) -> timedelta | None:
     base = _base_minutes(session, cargo)
     if base is None:
         return None
-    if weight_kg is None:
+    kind = vehicle or "heavy"
+    if weight_kg is None and kind != "light":
         return timedelta(minutes=base)
-    total = unload_minutes(base, weight_kg, _step_kg(session))
+    total = unload_minutes(base, int(weight_kg or 0), _step_kg(session), kind)
     return timedelta(minutes=total)
 
 
@@ -1104,11 +1257,12 @@ def _step_kg(session: Session) -> int:
     return int(row.weight_step_kg)
 
 
-def _checked_weight(weight_kg: int | None) -> int | None:
+def _checked_weight(weight_kg: int | None, vehicle: str = "heavy") -> int | None:
     if weight_kg is None:
         return None
-    if weight_kg < 1000 or weight_kg > WEIGHT_MAX_KG or weight_kg % 1000:
-        raise FieldError("Укажите целое число тонн от 1 до 40.")
+    limit = LIGHT_MAX_KG if vehicle == "light" else WEIGHT_MAX_KG
+    if weight_kg < 1000 or weight_kg > limit or weight_kg % 1000:
+        raise FieldError(f"Укажите целое число тонн от 1 до {limit // 1000}.")
     return weight_kg
 
 
@@ -1428,7 +1582,12 @@ def _trip(session: Session, booking: Booking) -> Trip:
     base = _base_minutes(session, booking.cargo_type)
     parts = None
     if base is not None:
-        parts = unload_parts(base, int(booking.weight_kg or 0), _step_kg(session))
+        parts = unload_parts(
+            base,
+            int(booking.weight_kg or 0),
+            _step_kg(session),
+            booking.vehicle_kind,
+        )
     return Trip(
         id=booking.id,
         gate_id=gate.id,
@@ -1453,9 +1612,11 @@ def _trip(session: Session, booking: Booking) -> Trip:
         doc_file_id=booking.doc_file_id,
         doc_name=booking.doc_name,
         doc_result=booking.doc_result,
-        unload_base=parts[0] if parts is not None else None,
-        unload_addon=parts[1] if parts is not None else None,
-        unload_total=parts[2] if parts is not None else None,
+        unload_base=parts.base if parts is not None else None,
+        unload_addon=parts.addon if parts is not None else None,
+        unload_cut=parts.cut if parts is not None else None,
+        unload_total=parts.total if parts is not None else None,
+        unload_cap=parts.cap if parts is not None else None,
     )
 
 

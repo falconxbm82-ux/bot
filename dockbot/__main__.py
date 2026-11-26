@@ -15,6 +15,7 @@ from sqlalchemy import text
 from dockbot.bot.app import run_bot
 from dockbot.config import ConfigError, load_settings, redact
 from dockbot.adminboard import ensure_stand_staff
+from dockbot.booking import ensure_known_drivers
 from dockbot.configure import apply_configuration
 from dockbot.db import make_engine, upgrade_head
 from dockbot.documents import prepare_ocr
@@ -38,6 +39,7 @@ def main() -> None:
             upgrade_head()
             apply_configuration(engine, settings)
             ensure_stand_staff(engine)
+            ensure_known_drivers(engine)
             with engine.connect() as connection:
                 connection.execute(text("SELECT 1"))
             log.info("database connection ok")

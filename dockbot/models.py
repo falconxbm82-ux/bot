@@ -374,3 +374,22 @@ class CargoNorm(Base):
         CheckConstraint("char_length(btrim(label)) > 0", name="ck_cargo_norms_label"),
         CheckConstraint("minutes > 0", name="ck_cargo_norms_minutes"),
     )
+
+
+class KnownDriver(Base):
+    """Водитель стенда: ровно ФИО и госномер. Бронь сверяется с этой таблицей."""
+
+    __tablename__ = "known_drivers"
+
+    id: Mapped[int] = mapped_column(Integer, Identity(), primary_key=True)
+    driver_name: Mapped[str] = mapped_column(String(DRIVER_NAME_MAX), nullable=False)
+    plate: Mapped[str] = mapped_column(String(PLATE_MAX), nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("driver_name", name="uq_known_drivers_name"),
+        UniqueConstraint("plate", name="uq_known_drivers_plate"),
+        CheckConstraint(
+            "char_length(btrim(driver_name)) > 0", name="ck_known_drivers_name"
+        ),
+        CheckConstraint("char_length(btrim(plate)) > 0", name="ck_known_drivers_plate"),
+    )

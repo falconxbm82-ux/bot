@@ -19,6 +19,7 @@ from dockbot.bot.keyboard import (
     CANCEL_TRIP,
     DAY_SUMMARY,
     DIRECTIONS,
+    DRIVERS,
     ENTER_PIN,
     FINISHED,
     GATES,
@@ -51,6 +52,7 @@ from dockbot.bot.mine import (
 )
 from dockbot.bot.admin import (
     open_day,
+    open_drivers,
     open_gates,
     open_settings,
     open_slots,
@@ -204,6 +206,11 @@ async def choose_staff_list(
 @router.message(F.text == SETTINGS)
 async def choose_settings(message: Message, state: FSMContext, engine: Engine) -> None:
     await open_settings(message, state, engine)
+
+
+@router.message(F.text == DRIVERS)
+async def choose_drivers(message: Message, state: FSMContext, engine: Engine) -> None:
+    await open_drivers(message, state, engine)
 
 
 @router.message(F.text == DAY_SUMMARY)

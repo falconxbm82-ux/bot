@@ -17,6 +17,9 @@ from sqlalchemy.engine import Engine
 
 from dockbot.booking import (
     DAY_TAKEN,
+    HEAVY_CARGOS,
+    LIGHT_CARGOS,
+    NOT_LISTED,
     BookingError,
     FieldError,
     SiteNotConfigured,
@@ -27,13 +30,15 @@ from dockbot.booking import (
     clean_make,
     clean_weight_tons,
     booking_profile,
-    cargo_norms,
     create_booking,
+    driver_known,
     gates_with_slots,
     window_rules,
     get_owned,
     normalize_plate,
     load_zone,
+    offered_cargos,
+    pair_booked_on,
     reschedule_booking,
     slots_for_gate,
     window_phrase,
@@ -50,6 +55,7 @@ from dockbot.bot.ui import (
     SLOT_PREFIX,
     actor_ids,
     BACK,
+    CARGO_LABELS,
     CARGO_PREFIX,
     CURRENT_SLOT,
     EDIT,
@@ -59,7 +65,6 @@ from dockbot.bot.ui import (
     dates_markup,
     document_markup,
     weight_markup,
-    urgent_markup,
     vehicle_markup,
     gates_markup,
     menu_markup,
@@ -75,12 +80,6 @@ log = logging.getLogger(__name__)
 router = Router(name="wizard")
 _busy: set[tuple[int, int]] = set()
 WIZARD_DAYS = 7
-_CARGO_LABELS = {
-    "pallets": "Паллеты",
-    "bulk": "Навал",
-    "liquid": "Жидкость",
-    "reefer": "Рефрижератор",
-}
 
 
 class BookFlow(StatesGroup):
@@ -88,7 +87,6 @@ class BookFlow(StatesGroup):
     cargo_pick = State()
     weight = State()
     weight_note = State()
-    urgent = State()
     date = State()
     gate = State()
     slot = State()
@@ -128,11 +126,12 @@ async def pick_vehicle(query: CallbackQuery, state: FSMContext, engine: Engine) 
 @router.callback_query(BookFlow.cargo_pick, F.data.startswith(CARGO_PREFIX))
 async def pick_cargo_first(query: CallbackQuery, state: FSMContext) -> None:
     code = (query.data or "").removeprefix(CARGO_PREFIX)
-    if code == "other":
+    data = await state.get_data()
+    if code == "other" and data.get("vehicle") != "light":
         await state.set_state(BookFlow.cargo_note)
         await reply(query, "Напишите тип груза.", cancel_step_markup())
         return
-    label = _CARGO_LABELS.get(code)
+    label = _cargo_label(data, code)
     if label is None:
         await query.answer("Кнопка устарела", show_alert=True)
         return
@@ -140,24 +139,16 @@ async def pick_cargo_first(query: CallbackQuery, state: FSMContext) -> None:
     await show_weight(query, state)
 
 
-@router.callback_query(BookFlow.urgent, F.data.startswith("bk:urgent:"))
-async def pick_urgent(query: CallbackQuery, state: FSMContext, engine: Engine) -> None:
-    raw = (query.data or "").removeprefix("bk:urgent:")
-    if raw not in {"0", "1"}:
-        await query.answer("Кнопка устарела", show_alert=True)
-        return
-    await state.update_data(urgent=raw == "1")
-    await show_dates(query, state, engine)
-
-
 @router.callback_query(BookFlow.weight, F.data.startswith("bk:weight:"))
 async def pick_weight(query: CallbackQuery, state: FSMContext, engine: Engine) -> None:
     raw = (query.data or "").removeprefix("bk:weight:")
+    data = await state.get_data()
+    vehicle = data.get("vehicle") or "heavy"
     if raw == "other":
         await state.set_state(BookFlow.weight_note)
-        await reply(query, "Вес в тоннах, целое число от 1 до 40.", cancel_step_markup())
+        await reply(query, _weight_hint(vehicle), cancel_step_markup())
         return
-    if not raw.isdigit():
+    if not raw.isdigit() or not _weight_allowed(int(raw), vehicle):
         await query.answer("Кнопка устарела", show_alert=True)
         return
     await state.update_data(weight_kg=int(raw))
@@ -169,7 +160,8 @@ async def weight_text(message: Message, state: FSMContext, engine: Engine) -> No
     if await _aborted_text(message, state):
         return
     try:
-        weight_kg = clean_weight_tons(message.text or "")
+        data = await state.get_data()
+        weight_kg = clean_weight_tons(message.text or "", data.get("vehicle") or "heavy")
     except FieldError as exc:
         await message.answer(str(exc))
         return
@@ -264,31 +256,25 @@ async def show_vehicle(
 async def show_cargo_pick(
     event: Message | CallbackQuery, state: FSMContext, engine: Engine
 ) -> None:
-    norms = {
-        code: minutes
-        for code, _label, minutes in await asyncio.to_thread(cargo_norms, engine)
-    }
+    data = await state.get_data()
+    vehicle = data.get("vehicle") or "heavy"
+    rows = await asyncio.to_thread(offered_cargos, engine, vehicle)
+    minutes = {code: shown for code, _label, shown in rows}
     await state.set_state(BookFlow.cargo_pick)
-    await reply(
-        event,
-        "Тип груза. Длина окна — у кнопки.",
-        cargo_markup(norms),
-    )
+    text = "Тип груза. Длина окна — у кнопки."
+    if vehicle == "light":
+        text = "Тип груза для малотоннажного. Длина окна — у кнопки."
+    await reply(event, text, cargo_markup(minutes, vehicle))
 
 
 async def show_weight(event: Message | CallbackQuery, state: FSMContext) -> None:
+    data = await state.get_data()
+    vehicle = data.get("vehicle") or "heavy"
     await state.set_state(BookFlow.weight)
-    await reply(event, "Вес груза, тонны.", weight_markup())
-
-
-async def show_urgent(
-    event: Message | CallbackQuery, state: FSMContext, preface: str | None = None
-) -> None:
-    await state.set_state(BookFlow.urgent)
-    text = "Срочность рейса."
-    if preface:
-        text = f"{preface}\n{text}"
-    await reply(event, text, urgent_markup())
+    text = "Вес груза, тонны."
+    if vehicle == "light":
+        text = "Вес груза, тонны. Для малотоннажного до 5."
+    await reply(event, text, weight_markup(vehicle))
 
 
 async def show_document(
@@ -309,7 +295,7 @@ async def _after_weight(
     if data.get("driver_name"):
         await show_document(event, state, phrase or None)
         return
-    await show_urgent(event, state, phrase or None)
+    await show_dates(event, state, engine, preface=phrase or None)
 
 
 async def begin_move(
@@ -403,6 +389,10 @@ async def name_step(message: Message, state: FSMContext, engine: Engine) -> None
     except FieldError as exc:
         await message.answer(str(exc))
         return
+    data = await state.get_data()
+    plate = data.get("plate") or ""
+    if not await _party_allowed(message, state, engine, plate, field.value, data):
+        return
     await state.update_data(driver_name=field.value)
     data = await state.get_data()
     if data.get("cargo") and data.get("weight_kg"):
@@ -411,18 +401,20 @@ async def name_step(message: Message, state: FSMContext, engine: Engine) -> None
     if data.get("cargo"):
         await show_weight(message, state)
         return
+    vehicle = data.get("vehicle") or "heavy"
     await state.set_state(BookFlow.cargo)
-    await message.answer("Тип груза.", reply_markup=cargo_markup())
+    await message.answer("Тип груза.", reply_markup=cargo_markup(vehicle=vehicle))
 
 
 @router.callback_query(BookFlow.cargo, F.data.startswith(CARGO_PREFIX))
 async def cargo_button(query: CallbackQuery, state: FSMContext, engine: Engine) -> None:
     code = (query.data or "").removeprefix(CARGO_PREFIX)
-    if code == "other":
+    data = await state.get_data()
+    if code == "other" and data.get("vehicle") != "light":
         await state.set_state(BookFlow.cargo_note)
         await reply(query, "Напишите тип груза.", cancel_step_markup())
         return
-    label = _CARGO_LABELS.get(code)
+    label = _cargo_label(data, code)
     if label is None:
         await query.answer("Кнопка устарела", show_alert=True)
         return
@@ -432,7 +424,7 @@ async def cargo_button(query: CallbackQuery, state: FSMContext, engine: Engine) 
         await show_document(query, state)
         return
     if data.get("weight_kg"):
-        await show_urgent(query, state)
+        await show_dates(query, state, engine)
         return
     await show_weight(query, state)
 
@@ -441,10 +433,12 @@ async def cargo_button(query: CallbackQuery, state: FSMContext, engine: Engine) 
 async def cargo_step(message: Message, state: FSMContext) -> None:
     if await _aborted_text(message, state):
         return
-    await message.answer(
-        "Выберите тип груза кнопкой. «Другое» — если своего варианта нет.",
-        reply_markup=cargo_markup(),
-    )
+    data = await state.get_data()
+    vehicle = data.get("vehicle") or "heavy"
+    hint = "Выберите тип груза кнопкой."
+    if vehicle != "light":
+        hint = "Выберите тип груза кнопкой. Другое, если своего варианта нет."
+    await message.answer(hint, reply_markup=cargo_markup(vehicle=vehicle))
 
 
 @router.message(BookFlow.cargo_note, F.text)
@@ -464,7 +458,7 @@ async def cargo_note(message: Message, state: FSMContext, engine: Engine) -> Non
     if data.get("driver_name"):
         await show_document(message, state)
         return
-    await show_urgent(message, state)
+    await show_dates(message, state, engine)
 
 
 @router.callback_query(F.data == CURRENT_SLOT)
@@ -496,7 +490,6 @@ async def edit_details(query: CallbackQuery, state: FSMContext) -> None:
         "vehicle": data.get("vehicle"),
         "cargo": data.get("cargo"),
         "weight_kg": data.get("weight_kg"),
-        "urgent": data.get("urgent"),
         "keyboard_hidden": data.get("keyboard_hidden"),
     }
     await state.set_data(kept)
@@ -577,7 +570,6 @@ async def confirm(query: CallbackQuery, state: FSMContext, engine: Engine) -> No
                     telegram_id=telegram_id,
                     chat_id=chat_id,
                     vehicle=data.get("vehicle") or "heavy",
-                    urgent=bool(data.get("urgent")),
                     weight_kg=int(data["weight_kg"]),
                     doc_file_id=data.get("doc_file_id"),
                     doc_name=data.get("doc_name"),
@@ -808,7 +800,6 @@ async def show_summary(
             moving=moving,
             rules=await asyncio.to_thread(window_rules, engine),
             vehicle=None if moving else data.get("vehicle"),
-            urgent=bool(data.get("urgent")),
             weight_kg=weight_kg,
             document=document,
             formula=formula or None,
@@ -831,10 +822,63 @@ async def _party(
 
 
 async def _phrase(engine: Engine, data: dict) -> str:
-    cargo, _vehicle, weight = await _party(engine, data)
+    cargo, vehicle, weight = await _party(engine, data)
     if not cargo or weight is None:
         return ""
-    return await asyncio.to_thread(window_phrase, engine, cargo, weight)
+    return await asyncio.to_thread(
+        window_phrase, engine, cargo, int(weight), vehicle or "heavy"
+    )
+
+
+def _cargo_label(data: dict, code: str) -> str | None:
+    vehicle = data.get("vehicle") or "heavy"
+    allowed = LIGHT_CARGOS if vehicle == "light" else HEAVY_CARGOS
+    if code not in {item[0] for item in allowed}:
+        return None
+    return CARGO_LABELS.get(code)
+
+
+def _weight_allowed(kg: int, vehicle: str) -> bool:
+    limit = 5000 if vehicle == "light" else 40000
+    return 1000 <= kg <= limit and kg % 1000 == 0
+
+
+def _weight_hint(vehicle: str) -> str:
+    limit = 5 if vehicle == "light" else 40
+    return f"Вес в тоннах, целое число от 1 до {limit}."
+
+
+async def _party_allowed(
+    message: Message,
+    state: FSMContext,
+    engine: Engine,
+    plate: str,
+    name: str,
+    data: dict,
+) -> bool:
+    try:
+        known = await asyncio.to_thread(driver_known, engine, plate, name)
+    except FieldError as exc:
+        await message.answer(str(exc))
+        return False
+    if not known:
+        await state.set_state(BookFlow.plate)
+        await message.answer(
+            f"{NOT_LISTED}\nГосномер, например А123ВС178.",
+            reply_markup=cancel_step_markup(),
+        )
+        return False
+    if data.get("date"):
+        day = date.fromisoformat(data["date"])
+        taken = await asyncio.to_thread(pair_booked_on, engine, day, plate, name)
+        if taken:
+            await state.set_state(BookFlow.plate)
+            await message.answer(
+                f"{DAY_TAKEN}\nГосномер, например А123ВС178. Дата и слот сохранены.",
+                reply_markup=cancel_step_markup(),
+            )
+            return False
+    return True
 
 
 async def _slot_from_state(engine: Engine, data: dict):

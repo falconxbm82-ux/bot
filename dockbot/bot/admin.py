@@ -18,7 +18,7 @@ from aiogram.types import (
 )
 from sqlalchemy.engine import Engine
 
-from dockbot.access import AccessDenied
+from dockbot.access import AccessDenied, active_staff
 from dockbot.adminboard import (
     BUFFER_CHOICES,
     CANCEL_CHOICES,
@@ -48,7 +48,14 @@ from dockbot.adminboard import (
     toggle_gate,
     toggle_light_only,
 )
-from dockbot.booking import DURATION_CAP_MINUTES, WEIGHT_ADDON_MINUTES, cargo_norms, weight_step_kg
+from dockbot.booking import (
+    DURATION_CAP_MINUTES,
+    LIGHT_CAP_MINUTES,
+    WEIGHT_ADDON_MINUTES,
+    cargo_norms,
+    known_driver_rows,
+    weight_step_kg,
+)
 from dockbot.bot.keyboard import keyboard_for
 from dockbot.bot.ui import MENU, menu_markup
 from dockbot.models import StaffRole
@@ -108,6 +115,21 @@ async def open_settings(message: Message, state: FSMContext, engine: Engine) -> 
 async def open_day(message: Message, state: FSMContext, engine: Engine) -> None:
     await state.clear()
     await _show_day(message, engine)
+
+
+async def open_drivers(message: Message, state: FSMContext, engine: Engine) -> None:
+    await state.clear()
+    user_id = _user_id(message)
+    if user_id is None:
+        return
+    person = await asyncio.to_thread(active_staff, engine, user_id)
+    if person is None or person.role is not StaffRole.admin:
+        await message.answer(RIGHTS)
+        return
+    rows = await asyncio.to_thread(known_driver_rows, engine)
+    lines = ["Водители стенда"]
+    lines.extend(f"{name} {plate}" for name, plate in rows)
+    await message.answer("\n".join(lines), reply_markup=keyboard_for(StaffRole.admin))
 
 
 @router.callback_query(F.data == "ad:gates")
@@ -242,6 +264,7 @@ async def show_norms(query: CallbackQuery, engine: Engine) -> None:
             "Норма типа и шаг веса.\n"
             f"Сейчас шаг {step // 1000} т: каждый следующий шаг добавляет "
             f"{WEIGHT_ADDON_MINUTES} мин. Потолок {DURATION_CAP_MINUTES} мин.\n"
+            f"Малотоннажный короче: минус треть, потолок {LIGHT_CAP_MINUTES} мин.\n"
             "Окно брони занимает ровно эти минуты."
         ),
         InlineKeyboardMarkup(inline_keyboard=rows),
