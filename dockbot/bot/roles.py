@@ -18,7 +18,6 @@ from dockbot.bot.keyboard import (
     BOOK,
     CANCEL_TRIP,
     DAY_SUMMARY,
-    DIRECTIONS,
     DRIVERS,
     ENTER_PIN,
     FINISHED,
@@ -45,7 +44,6 @@ from dockbot.bot.keyboard import (
 )
 from dockbot.bot.mine import (
     show_cancel_choices,
-    show_directions,
     show_move_choices,
     show_my_bookings,
     show_my_pass,
@@ -73,9 +71,9 @@ from dockbot.models import StaffRole
 
 router = Router(name="roles")
 
-DRIVER_TEXT = "Режим водителя."
-GUARD_TEXT = "Режим охраны."
-WAREHOUSE_TEXT = "Режим кладовщика."
+DRIVER_TEXT = "Меню водителя."
+GUARD_TEXT = "Меню охраны."
+WAREHOUSE_TEXT = "Меню кладовщика."
 LOGGED_OUT = "Вы вышли из роли."
 
 
@@ -148,11 +146,6 @@ async def choose_bookings(message: Message, engine: Engine) -> None:
 @router.message(F.text == MY_PASS)
 async def choose_pass(message: Message, engine: Engine) -> None:
     await show_my_pass(message, engine)
-
-
-@router.message(F.text == DIRECTIONS)
-async def choose_directions(message: Message, engine: Engine) -> None:
-    await show_directions(message, engine)
 
 
 @router.message(F.text == CANCEL_TRIP)

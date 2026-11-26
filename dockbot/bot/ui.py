@@ -41,7 +41,6 @@ BACK = "nav:back"
 EDIT = "bk:edit"
 CURRENT_SLOT = "bk:current"
 CARGO_PREFIX = "bk:cargo:"
-GEO = "my:geo"
 BOOK_INLINE = CALLBACK_BOOK
 
 _PASS_STATUSES = {
@@ -278,7 +277,6 @@ def pass_done_markup(booking_id: int) -> InlineKeyboardMarkup:
                     callback_data=f"{PASS_PREFIX}{booking_id}",
                 )
             ],
-            [InlineKeyboardButton(text="Геометка склада", callback_data=GEO)],
             [InlineKeyboardButton(text="В меню", callback_data=MENU)],
         ]
     )

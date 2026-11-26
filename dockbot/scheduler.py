@@ -72,10 +72,8 @@ class TelegramSender(Outbound):
     async def _reminder(
         self, chat_id: int, latitude: float, longitude: float, text: str
     ) -> None:
+        del latitude, longitude
         await self._bot.send_message(chat_id, text)
-        await self._bot.send_location(
-            chat_id, latitude=latitude, longitude=longitude
-        )
 
     def _run(self, coro: object) -> None:
         future = asyncio.run_coroutine_threadsafe(coro, self._loop)  # type: ignore[arg-type]

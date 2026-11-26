@@ -190,7 +190,7 @@ def normalize_plate(raw: str) -> str:
     """Госномер для мастера: кириллица и пример А123ВС178."""
     text = "".join(raw.upper().split()).translate(_PLATE_LATIN)
     if _PLATE_RE.fullmatch(text) is None:
-        raise FieldError("Не похоже на госномер, пример А123ВС178")
+        raise FieldError("Не похоже на госномер. Пример: А123ВС178.")
     return text
 
 
@@ -288,6 +288,15 @@ def clean_cargo(raw: str) -> FieldValue:
         "Тип груза не может быть пустым.",
         "Тип груза обрезан до",
     )
+
+
+def slot_has_passed(slot_end: datetime, now: datetime | None = None) -> bool:
+    """Окно уже закончилось: пропуск по этой дате и времени не предъявляют."""
+    moment = now or datetime.now(timezone.utc)
+    end = slot_end if slot_end.tzinfo is not None else slot_end.replace(tzinfo=timezone.utc)
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return moment >= end
 
 
 def load_location(engine: Engine) -> tuple[float, float] | None:
@@ -575,7 +584,7 @@ def reschedule_booking(
                 )
                 cell = _fit_cell(warehouse, gate_id, slot_start, duration)
                 if cell is None or not cell.start > moment:
-                    raise SlotTaken("Этот слот больше не доступен. Выберите другой.")
+                    raise SlotTaken("Это окно больше недоступно. Выберите другое.")
                 _reject_vehicle(session, cell.gate_id, booking.vehicle_kind)
                 if _same_slot(booking, cell):
                     trip = _trip(session, booking)
@@ -1016,7 +1025,7 @@ def _insert_booking(
     duration = _cargo_duration(session, cargo_type, weight_kg, vehicle)
     cell = _fit_cell(warehouse, gate_id, slot_start, duration)
     if cell is None or not cell.start > now:
-        raise SlotTaken("Этот слот больше не доступен. Выберите другой.")
+        raise SlotTaken("Это окно больше недоступно. Выберите другое.")
     _reject_vehicle(session, cell.gate_id, vehicle)
     taken = _range_taken(
         session, cell.gate_id, cell.start, cell.end, None, warehouse.buffer

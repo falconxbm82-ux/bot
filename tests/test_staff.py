@@ -74,6 +74,7 @@ from dockbot.booking import (  # noqa: E402
 )
 from dockbot.bot.keyboard import button_labels, keyboard_for  # noqa: E402
 from dockbot.checkpoint import (  # noqa: E402
+    PassExpired,
     PassNotFound,
     TransitionRejected,
     apply_mark,
@@ -166,6 +167,16 @@ class StaffTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self._wipe()
+        from dockbot.roster import LIGHT_NORMS
+
+        with Session(ENGINE) as session:
+            with session.begin():
+                for code, _label, minutes in LIGHT_NORMS:
+                    session.execute(
+                        update(CargoNorm)
+                        .where(CargoNorm.code == code)
+                        .values(minutes=minutes)
+                    )
 
     def test_roles_split_pass_check_and_shift_marks(self) -> None:
         self._staff(pin="2468", telegram_id=STAFF_TG)
@@ -178,7 +189,7 @@ class StaffTests(unittest.TestCase):
         with self.assertRaises(AccessDenied):
             apply_mark(ENGINE, DRIVER, trip.id, BookingStatus.arrived, now=NOW)
         self.assertEqual(self._status(trip.id), BookingStatus.booked)
-        found = find_pass(ENGINE, STAFF_TG, pin=trip.pass_pin)
+        found = find_pass(ENGINE, STAFF_TG, pin=trip.pass_pin, now=NOW)
         self.assertEqual(found.id, trip.id)
         apply_mark(ENGINE, WAREHOUSE_TG, trip.id, BookingStatus.arrived, now=NOW)
         self.assertEqual(self._status(trip.id), BookingStatus.arrived)
@@ -207,7 +218,6 @@ class StaffTests(unittest.TestCase):
                 "Записаться",
                 "Мои брони",
                 "Мой пропуск",
-                "Как проехать",
                 "Отменить",
                 "Перенести",
                 "Я сотрудник",
@@ -458,7 +468,7 @@ class StaffTests(unittest.TestCase):
         self.assertEqual(self._status(trip.id), BookingStatus.booked)
         self.assertIsNone(self._column(trip.id, "arrived_at"))
         self.assertEqual(self._event_count(trip.id), before)
-        found = read_pass_image(ENGINE, STAFF_TG, qr_png(trip.pass_token))
+        found = read_pass_image(ENGINE, STAFF_TG, qr_png(trip.pass_token), now=NOW)
         assert found is not None
         self.assertEqual(found.id, trip.id)
         self.assertEqual(self._status(trip.id), BookingStatus.booked)
@@ -466,6 +476,37 @@ class StaffTests(unittest.TestCase):
             read_pass_image(ENGINE, OTHER_TG, qr_png(trip.pass_token))
         with self.assertRaises(AccessDenied):
             find_pass(ENGINE, OTHER_TG, pin=trip.pass_pin)
+
+    def test_expired_slot_is_not_a_valid_pass(self) -> None:
+        self._staff(pin="2468", telegram_id=STAFF_TG)
+        self._warehouse()
+        trip = self._book(TOMORROW, 8)
+        before = trip.slot_end - timedelta(minutes=1)
+        after = trip.slot_end
+        self.assertEqual(
+            find_pass(ENGINE, STAFF_TG, pin=trip.pass_pin, now=before).id,
+            trip.id,
+        )
+        self.assertEqual(
+            find_pass(
+                ENGINE, STAFF_TG, token=trip.pass_token, now=trip.slot_start
+            ).id,
+            trip.id,
+        )
+        with self.assertRaises(PassExpired):
+            find_pass(ENGINE, STAFF_TG, pin=trip.pass_pin, now=after)
+        with self.assertRaises(PassExpired):
+            find_pass(ENGINE, STAFF_TG, token=trip.pass_token, now=after)
+        with self.assertRaises(PassExpired):
+            read_pass_image(ENGINE, STAFF_TG, qr_png(trip.pass_token), now=after)
+        with self.assertRaises(PassExpired):
+            apply_mark(ENGINE, STAFF_TG, trip.id, BookingStatus.arrived, now=after)
+        self.assertEqual(self._status(trip.id), BookingStatus.booked)
+        apply_mark(ENGINE, STAFF_TG, trip.id, BookingStatus.arrived, now=before)
+        unloading = apply_mark(
+            ENGINE, WAREHOUSE_TG, trip.id, BookingStatus.unloading, now=after
+        )
+        self.assertEqual(unloading.status, BookingStatus.unloading)
 
     def test_active_pin_wins_and_archive_does_not_mark_arrived(self) -> None:
         self._staff(pin="2468", telegram_id=STAFF_TG)
@@ -483,7 +524,7 @@ class StaffTests(unittest.TestCase):
             plate="OLD1",
             created_at=NOW - timedelta(days=1),
         )
-        found = find_pass(ENGINE, STAFF_TG, pin="222222")
+        found = find_pass(ENGINE, STAFF_TG, pin="222222", now=NOW)
         self.assertEqual(found.id, active)
         older = self._insert(
             start=_at(TODAY, 8, gate="2"),
@@ -500,7 +541,7 @@ class StaffTests(unittest.TestCase):
             plate="NEWER",
             created_at=NOW,
         )
-        archived = find_pass(ENGINE, STAFF_TG, pin="333333")
+        archived = find_pass(ENGINE, STAFF_TG, pin="333333", now=NOW)
         self.assertEqual(archived.id, newer)
         self.assertNotEqual(archived.id, older)
         self.assertEqual(checkpoint_actions(archived), ())
@@ -612,7 +653,7 @@ class StaffTests(unittest.TestCase):
         self._staff(pin="2468", telegram_id=STAFF_TG)
         late = self._book(TOMORROW, 9)
         self._set_status(late.id, BookingStatus.late)
-        found = find_pass(ENGINE, STAFF_TG, pin=late.pass_pin)
+        found = find_pass(ENGINE, STAFF_TG, pin=late.pass_pin, now=NOW)
         self.assertEqual(found.status, BookingStatus.late)
         self.assertEqual(checkpoint_actions(found), ())
         self.assertEqual(row_actions(found), ())

@@ -95,9 +95,9 @@ async def desk_vehicle(query: CallbackQuery, state: FSMContext, engine: Engine) 
     rows = await asyncio.to_thread(offered_cargos, engine, kind)
     minutes = {code: shown for code, _label, shown in rows}
     await state.set_state(DeskFlow.cargo)
-    text = "Тип груза. Длина окна — у кнопки."
+    text = "Тип груза. Минуты разгрузки указаны на кнопке."
     if kind == "light":
-        text = "Тип груза для малотоннажного. Длина окна — у кнопки."
+        text = "Тип груза для малотоннажного. Минуты разгрузки указаны на кнопке."
     await reply(query, text, cargo_markup(minutes, kind))
 
 
@@ -116,9 +116,9 @@ async def desk_cargo(query: CallbackQuery, state: FSMContext) -> None:
         return
     await state.update_data(cargo=label)
     await state.set_state(DeskFlow.weight)
-    text = "Вес груза, тонны."
+    text = "Вес груза в тоннах."
     if vehicle == "light":
-        text = "Вес груза, тонны. Для малотоннажного до 5."
+        text = "Вес груза в тоннах. Для малотоннажного не больше 5."
     await reply(query, text, weight_markup(vehicle))
 
 
@@ -133,7 +133,7 @@ async def desk_cargo_note(message: Message, state: FSMContext) -> None:
     data = await state.get_data()
     vehicle = data.get("vehicle") or "heavy"
     await state.set_state(DeskFlow.weight)
-    await message.answer("Вес груза, тонны.", reply_markup=weight_markup(vehicle))
+    await message.answer("Вес груза в тоннах.", reply_markup=weight_markup(vehicle))
 
 
 @router.callback_query(DeskFlow.weight, F.data.startswith("bk:weight:"))
@@ -208,7 +208,7 @@ async def desk_plate(message: Message, state: FSMContext) -> None:
         return
     await state.update_data(plate=plate)
     await state.set_state(DeskFlow.make)
-    await message.answer("Марка.")
+    await message.answer("Марка машины.")
 
 
 @router.message(DeskFlow.make, F.text)

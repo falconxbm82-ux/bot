@@ -13,8 +13,9 @@ from sqlalchemy import create_engine
 from dockbot.access import StaffMember
 from dockbot.bot.app import build_dispatcher
 from dockbot.bot.keyboard import button_labels
+from dockbot.bot.staff import StaffFlow
 from dockbot.bot.wizard import BookFlow
-from dockbot.models import StaffRole
+from dockbot.models import BookingStatus, StaffRole
 
 
 class _Session:
@@ -122,6 +123,52 @@ class ButtonTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any(NOT_LISTED in item for item in texts))
         self.assertEqual(await self._state(), BookFlow.plate.state)
 
+    async def test_expired_pass_is_refused_for_the_driver_and_security(self) -> None:
+        from datetime import timedelta
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        from dockbot.booking import Trip
+        from dockbot.checkpoint import PassExpired
+        from dockbot.present import PASS_EXPIRED
+
+        end = datetime.now(timezone.utc) - timedelta(minutes=5)
+        expired = SimpleNamespace(slot_end=end)
+        with patch("dockbot.bot.mine.list_live", return_value=[expired]):
+            texts = await self._feed_text("Мой пропуск", None, {})
+        self.assertTrue(any(PASS_EXPIRED in item for item in texts))
+        self.assertFalse(self._photos())
+
+        start = end - timedelta(hours=1)
+        trip = Trip(
+            id=1,
+            gate_id=1,
+            gate_code="1",
+            gate_name="Ворота 1",
+            slot_start=start,
+            slot_end=end,
+            plate="А100АА77",
+            make="КАМАЗ",
+            driver_name="Иванов Иван Иванович",
+            cargo_type="Паллеты",
+            status=BookingStatus.booked,
+            pass_token="token",
+            pass_pin="330869",
+            driver_telegram_id=42,
+            driver_chat_id=42,
+        )
+        with patch("dockbot.bot.mine.get_owned", return_value=trip):
+            texts = await self._press("my:pass:1")
+        self.assertTrue(any(PASS_EXPIRED in item for item in texts))
+        self.assertFalse(self._photos())
+
+        with patch("dockbot.bot.staff.find_pass", side_effect=PassExpired):
+            texts = await self._feed_text(
+                "330869", StaffFlow.checkpoint, {}, StaffRole.security
+            )
+        self.assertTrue(any(PASS_EXPIRED in item for item in texts))
+        self.assertFalse(self._photos())
+
     async def test_cancel_with_a_dialog_returns_the_role_keyboard(self) -> None:
         labels = await self._press(
             "bk:abort",
@@ -170,8 +217,8 @@ class ButtonTests(unittest.IsolatedAsyncioTestCase):
         )
         await self._dispatch(Update(update_id=self._update_id, callback_query=query))
 
-    async def _feed_text(self, text: str, state, stored: dict) -> list[str]:
-        self._person = None
+    async def _feed_text(self, text: str, state, stored: dict, role=None) -> list[str]:
+        self._person = role
         self.session.calls.clear()
         key = self._key()
         await self.dp.storage.set_state(key, state)
@@ -206,6 +253,7 @@ class ButtonTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch("dockbot.access.active_staff", staff),
             patch("dockbot.bot.fallback.active_staff", staff),
+            patch("dockbot.bot.staff.active_staff", staff),
         ):
             await self.dp.feed_update(self.bot, update)
 
@@ -214,6 +262,9 @@ class ButtonTests(unittest.IsolatedAsyncioTestCase):
 
     async def _state(self):
         return await self.dp.storage.get_state(self._key())
+
+    def _photos(self) -> list[object]:
+        return [call for call in self.session.calls if getattr(call, "photo", None)]
 
     def _keyboard_labels(self) -> list[str]:
         labels: list[str] = []

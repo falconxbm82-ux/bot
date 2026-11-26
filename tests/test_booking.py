@@ -584,8 +584,19 @@ class BookingTests(unittest.TestCase):
             unload_minutes,
         )
         from dockbot.present import card_text
-        from dockbot.roster import NOT_LISTED, STAND_DRIVERS
+        from sqlalchemy import update
 
+        from dockbot.models import CargoNorm
+        from dockbot.roster import LIGHT_NORMS, NOT_LISTED, STAND_DRIVERS
+
+        with Session(ENGINE) as session:
+            with session.begin():
+                for code, _label, minutes in LIGHT_NORMS:
+                    session.execute(
+                        update(CargoNorm)
+                        .where(CargoNorm.code == code)
+                        .values(minutes=minutes)
+                    )
         rows = known_driver_rows(ENGINE)
         self.assertEqual(len(rows), 10)
         self.assertEqual(len(STAND_DRIVERS), 10)

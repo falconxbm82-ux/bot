@@ -218,7 +218,7 @@ async def document_missing(message: Message, state: FSMContext) -> None:
     if await _aborted_text(message, state):
         return
     await message.answer(
-        "Нужно фото документа: путевой лист или водительское. Пустой кадр не подойдёт.",
+        "Нужно фото документа: путевой лист или водительское удостоверение. Пустой кадр не подойдёт.",
         reply_markup=cancel_step_markup(),
     )
 
@@ -261,9 +261,9 @@ async def show_cargo_pick(
     rows = await asyncio.to_thread(offered_cargos, engine, vehicle)
     minutes = {code: shown for code, _label, shown in rows}
     await state.set_state(BookFlow.cargo_pick)
-    text = "Тип груза. Длина окна — у кнопки."
+    text = "Тип груза. Минуты разгрузки указаны на кнопке."
     if vehicle == "light":
-        text = "Тип груза для малотоннажного. Длина окна — у кнопки."
+        text = "Тип груза для малотоннажного. Минуты разгрузки указаны на кнопке."
     await reply(event, text, cargo_markup(minutes, vehicle))
 
 
@@ -271,9 +271,9 @@ async def show_weight(event: Message | CallbackQuery, state: FSMContext) -> None
     data = await state.get_data()
     vehicle = data.get("vehicle") or "heavy"
     await state.set_state(BookFlow.weight)
-    text = "Вес груза, тонны."
+    text = "Вес груза в тоннах."
     if vehicle == "light":
-        text = "Вес груза, тонны. Для малотоннажного до 5."
+        text = "Вес груза в тоннах. Для малотоннажного не больше 5."
     await reply(event, text, weight_markup(vehicle))
 
 
@@ -281,7 +281,10 @@ async def show_document(
     event: Message | CallbackQuery, state: FSMContext, preface: str | None = None
 ) -> None:
     await state.set_state(BookFlow.document)
-    text = "Фото документа: путевой лист или водительское. На снимке госномер и ФИО."
+    text = (
+        "Фото документа: путевой лист или водительское удостоверение. "
+        "На снимке должны быть госномер и ФИО."
+    )
     if preface:
         text = f"{preface}\n{text}"
     await reply(event, text, cancel_step_markup())
@@ -341,7 +344,7 @@ async def pick_slot(query: CallbackQuery, state: FSMContext, engine: Engine) -> 
     await state.update_data(slot_ts=int(raw))
     data = await state.get_data()
     if await _slot_from_state(engine, data) is None:
-        await show_slots(query, state, engine, preface="Этот слот больше не доступен.")
+        await show_slots(query, state, engine, preface="Это окно больше недоступно.")
         return
     if data.get("mode") == "move":
         await show_summary(query, state, engine)
@@ -367,7 +370,7 @@ async def plate_step(message: Message, state: FSMContext) -> None:
         _plate_field,
         "plate",
         BookFlow.make,
-        "Марка.",
+        "Марка машины.",
     )
 
 
@@ -527,7 +530,7 @@ async def confirm(query: CallbackQuery, state: FSMContext, engine: Engine) -> No
         slot = await _slot_from_state(engine, data)
         if slot is None:
             await show_slots(
-                query, state, engine, preface="Этот слот больше не доступен."
+                query, state, engine, preface="Это окно больше недоступно."
             )
             return
         if moving and not data.get("booking_id"):
@@ -603,7 +606,7 @@ async def confirm(query: CallbackQuery, state: FSMContext, engine: Engine) -> No
 
 
 async def _hide_reply(event: Message | CallbackQuery) -> None:
-    text = "Шаги записи — кнопками в сообщении."
+    text = "Дальше шаги записи идут кнопками в сообщении."
     if isinstance(event, Message):
         await event.answer(text, reply_markup=hide_keyboard())
         return
@@ -752,7 +755,7 @@ async def show_summary(
         None,
     )
     if selected is None:
-        await show_slots(event, state, engine, preface="Этот слот больше не доступен.")
+        await show_slots(event, state, engine, preface="Это окно больше недоступно.")
         return
     moving = data.get("mode") == "move"
     if moving:
@@ -1003,7 +1006,7 @@ async def _send_pass(
             caption=caption,
         )
         await message.answer(
-            "Пропуск выше. PIN — в подписи к фото.",
+            "Пропуск выше. PIN указан в подписи к фото.",
             reply_markup=pass_done_markup(booking_id),
         )
         await message.answer("Меню водителя.", reply_markup=driver_menu())
