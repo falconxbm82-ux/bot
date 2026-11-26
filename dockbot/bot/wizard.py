@@ -380,6 +380,12 @@ async def pick_slot(query: CallbackQuery, state: FSMContext, engine: Engine) -> 
         await show_summary(query, state, engine)
         return
     if all(data.get(key) for key in ("plate", "make", "driver_name", "cargo")):
+        if not data.get("places"):
+            await show_places(query, state)
+            return
+        if data.get("doc_result") != "match":
+            await show_document(query, state)
+            return
         await show_summary(query, state, engine)
         return
     await state.set_state(BookFlow.plate)
@@ -429,6 +435,9 @@ async def name_step(message: Message, state: FSMContext, engine: Engine) -> None
     await state.update_data(driver_name=field.value)
     data = await state.get_data()
     if data.get("cargo") and data.get("weight_kg"):
+        if not data.get("places"):
+            await show_places(message, state)
+            return
         await show_document(message, state)
         return
     if data.get("cargo"):
@@ -454,9 +463,15 @@ async def cargo_button(query: CallbackQuery, state: FSMContext, engine: Engine) 
     await state.update_data(cargo=label)
     data = await state.get_data()
     if data.get("weight_kg") and data.get("driver_name"):
+        if not data.get("places"):
+            await show_places(query, state)
+            return
         await show_document(query, state)
         return
     if data.get("weight_kg"):
+        if not data.get("places"):
+            await show_places(query, state)
+            return
         await show_dates(query, state, engine)
         return
     await show_weight(query, state)
@@ -487,6 +502,9 @@ async def cargo_note(message: Message, state: FSMContext, engine: Engine) -> Non
     data = await state.get_data()
     if not data.get("weight_kg"):
         await show_weight(message, state)
+        return
+    if not data.get("places"):
+        await show_places(message, state)
         return
     if data.get("driver_name"):
         await show_document(message, state)
@@ -523,6 +541,7 @@ async def edit_details(query: CallbackQuery, state: FSMContext) -> None:
         "vehicle": data.get("vehicle"),
         "cargo": data.get("cargo"),
         "weight_kg": data.get("weight_kg"),
+        "places": data.get("places"),
         "keyboard_hidden": data.get("keyboard_hidden"),
     }
     await state.set_data(kept)

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 
 from aiogram import F, Router
+from aiogram.filters import StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
@@ -21,6 +22,7 @@ from dockbot.yard import (
     PAUSE_GATE,
     CloseMismatch,
     YardError,
+    assert_can_close,
     close_unload,
     mark_damage,
     queue_for_trip,
@@ -90,8 +92,17 @@ async def begin_close(query: CallbackQuery, state: FSMContext, engine: Engine) -
         await _say(query, RIGHTS)
         return
     booking_id = _id(query.data, "st:done:")
-    if booking_id is None:
+    user = query.from_user
+    if booking_id is None or user is None:
         await _say(query, "Бронь не найдена.")
+        return
+    try:
+        await asyncio.to_thread(assert_can_close, engine, user.id, booking_id)
+    except AccessDenied:
+        await _say(query, RIGHTS)
+        return
+    except YardError as exc:
+        await _say(query, str(exc))
         return
     await state.set_state(YardFlow.plate)
     await state.update_data(yard_id=booking_id)
@@ -99,7 +110,8 @@ async def begin_close(query: CallbackQuery, state: FSMContext, engine: Engine) -
 
 
 @router.callback_query(F.data.startswith("wh:queue:"))
-async def show_queue(query: CallbackQuery, engine: Engine) -> None:
+async def show_queue(query: CallbackQuery, state: FSMContext, engine: Engine) -> None:
+    await state.set_state(None)
     if await _role(query, engine) is None:
         await _say(query, RIGHTS)
         return
@@ -120,12 +132,14 @@ async def show_queue(query: CallbackQuery, engine: Engine) -> None:
 
 
 @router.callback_query(F.data.startswith("wh:start:"))
-async def begin_unload(query: CallbackQuery, engine: Engine) -> None:
+async def begin_unload(query: CallbackQuery, state: FSMContext, engine: Engine) -> None:
+    await state.set_state(None)
     await _run(query, engine, "wh:start:", start_unload)
 
 
 @router.callback_query(F.data.startswith("wh:pause:"))
-async def ask_pause(query: CallbackQuery, engine: Engine) -> None:
+async def ask_pause(query: CallbackQuery, state: FSMContext, engine: Engine) -> None:
+    await state.set_state(None)
     if await _role(query, engine) is None:
         await _say(query, RIGHTS)
         return
@@ -175,12 +189,14 @@ async def save_pause(query: CallbackQuery, engine: Engine) -> None:
 
 
 @router.callback_query(F.data.startswith("wh:resume:"))
-async def continue_unload(query: CallbackQuery, engine: Engine) -> None:
+async def continue_unload(query: CallbackQuery, state: FSMContext, engine: Engine) -> None:
+    await state.set_state(None)
     await _run(query, engine, "wh:resume:", resume_unload)
 
 
 @router.callback_query(F.data.startswith("wh:fact:"))
-async def ask_fact(query: CallbackQuery, engine: Engine) -> None:
+async def ask_fact(query: CallbackQuery, state: FSMContext, engine: Engine) -> None:
+    await state.set_state(None)
     if await _role(query, engine) is None:
         await _say(query, RIGHTS)
         return
@@ -300,8 +316,27 @@ async def save_photo(message: Message, state: FSMContext, engine: Engine) -> Non
 
 
 @router.callback_query(F.data.startswith("wh:damage:"))
-async def save_damage(query: CallbackQuery, engine: Engine) -> None:
+async def save_damage(query: CallbackQuery, state: FSMContext, engine: Engine) -> None:
+    await state.set_state(None)
     await _run(query, engine, "wh:damage:", mark_damage)
+
+
+@router.message(YardFlow.photo, ~F.photo)
+async def photo_needed(message: Message) -> None:
+    await message.answer("Пришлите фото разгрузки.")
+
+
+@router.message(YardFlow.fact, ~F.text)
+async def fact_needed(message: Message) -> None:
+    await message.answer("Введите факт текстом.")
+
+
+@router.message(
+    StateFilter(YardFlow.plate, YardFlow.cargo, YardFlow.weight, YardFlow.places),
+    ~F.text,
+)
+async def check_needed(message: Message) -> None:
+    await message.answer("Для сверки нужен текст.")
 
 
 @router.message(YardFlow.plate, F.text)

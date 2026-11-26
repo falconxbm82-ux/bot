@@ -33,6 +33,7 @@ from dockbot.booking import (
     driver_known,
     get_owned,
     normalize_plate,
+    list_closed_today,
     list_live,
     load_zone,
     slot_has_passed,
@@ -65,6 +66,7 @@ from dockbot.bot.ui import (
     trips_markup,
 )
 from dockbot.bot.wizard import begin_move
+from dockbot.models import BookingStatus
 from dockbot.passes import qr_png
 from dockbot.present import PASS_EXPIRED, card_text, local_parts, pass_caption
 
@@ -98,19 +100,24 @@ async def show_my_pass(message: Message, engine: Engine) -> None:
     if user is None:
         return
     try:
-        trips = await asyncio.to_thread(list_live, engine, user.id, message.chat.id)
+        live = await asyncio.to_thread(list_live, engine, user.id, message.chat.id)
+        closed = await asyncio.to_thread(
+            list_closed_today, engine, user.id, message.chat.id
+        )
     except SiteNotConfigured as exc:
         await message.answer(str(exc))
         return
+    open_trips = [trip for trip in live if not slot_has_passed(trip.slot_end)]
+    known = {trip.id for trip in open_trips}
+    trips = open_trips + [trip for trip in closed if trip.id not in known]
     if not trips:
+        if live:
+            await message.answer(PASS_EXPIRED, reply_markup=driver_menu())
+            return
         await message.answer(
             "Активных броней нет. Нажмите «Записаться».",
             reply_markup=empty_bookings_markup(),
         )
-        return
-    trips = [trip for trip in trips if not slot_has_passed(trip.slot_end)]
-    if not trips:
-        await message.answer(PASS_EXPIRED, reply_markup=driver_menu())
         return
     try:
         zone = await asyncio.to_thread(load_zone, engine)
@@ -158,16 +165,23 @@ async def _message_list(message: Message, engine: Engine, title: str) -> None:
         return
     try:
         trips = await asyncio.to_thread(list_live, engine, user.id, message.chat.id)
+        closed = await asyncio.to_thread(
+            list_closed_today, engine, user.id, message.chat.id
+        )
         zone = await asyncio.to_thread(load_zone, engine)
     except SiteNotConfigured as exc:
         await message.answer(str(exc))
         return
+    known = {trip.id for trip in trips}
+    trips = trips + [trip for trip in closed if trip.id not in known]
     if not trips:
         await message.answer(
             "Активных броней нет. Нажмите «Записаться».",
             reply_markup=empty_bookings_markup(),
         )
         return
+    if any(trip.status is BookingStatus.completed for trip in trips):
+        title = "Ваши брони."
     await message.answer(title, reply_markup=trips_markup(trips, zone, 0))
 
 
@@ -339,10 +353,13 @@ async def _show_list(query: CallbackQuery, engine: Engine, offset: int) -> None:
         return
     try:
         trips = await asyncio.to_thread(list_live, engine, ids[0], ids[1])
+        closed = await asyncio.to_thread(list_closed_today, engine, ids[0], ids[1])
         zone = await asyncio.to_thread(load_zone, engine)
     except SiteNotConfigured as exc:
         await reply(query, str(exc), driver_menu())
         return
+    known = {trip.id for trip in trips}
+    trips = trips + [trip for trip in closed if trip.id not in known]
     if not trips:
         await reply(
             query,
@@ -352,7 +369,12 @@ async def _show_list(query: CallbackQuery, engine: Engine, offset: int) -> None:
         return
     if offset < 0 or offset >= len(trips):
         offset = 0
-    await reply(query, "Будущие брони.", trips_markup(trips, zone, offset))
+    title = (
+        "Ваши брони."
+        if any(trip.status is BookingStatus.completed for trip in trips)
+        else "Будущие брони."
+    )
+    await reply(query, title, trips_markup(trips, zone, offset))
 
 
 async def _show_card(query: CallbackQuery, engine: Engine, booking_id: int) -> None:

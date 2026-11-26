@@ -12,7 +12,7 @@ import math
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import func, select
@@ -340,6 +340,32 @@ def list_live(
                 Booking.driver_telegram_id == telegram_id,
                 Booking.driver_chat_id == chat_id,
                 Booking.status.in_(OCCUPYING_STATUSES),
+            )
+            .order_by(Booking.slot_start, Booking.id)
+        ).all()
+        return [_trip(session, row) for row in rows]
+
+
+def list_closed_today(
+    engine: Engine,
+    telegram_id: int,
+    chat_id: int,
+    now: datetime | None = None,
+) -> list[Trip]:
+    """Закрытые сегодня рейсы. Водитель видит, что рейс уже разгружен."""
+    moment = now or datetime.now(timezone.utc)
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    with Session(engine) as session:
+        zone = _load_warehouse(session).zone
+        start = datetime.combine(moment.astimezone(zone).date(), time.min, tzinfo=zone)
+        rows = session.scalars(
+            select(Booking)
+            .where(
+                Booking.driver_telegram_id == telegram_id,
+                Booking.driver_chat_id == chat_id,
+                Booking.status == BookingStatus.completed,
+                Booking.slot_start >= start,
             )
             .order_by(Booking.slot_start, Booking.id)
         ).all()

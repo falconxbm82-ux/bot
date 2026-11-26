@@ -134,7 +134,10 @@ class ButtonTests(unittest.IsolatedAsyncioTestCase):
 
         end = datetime.now(timezone.utc) - timedelta(minutes=5)
         expired = SimpleNamespace(slot_end=end)
-        with patch("dockbot.bot.mine.list_live", return_value=[expired]):
+        with (
+            patch("dockbot.bot.mine.list_live", return_value=[expired]),
+            patch("dockbot.bot.mine.list_closed_today", return_value=[]),
+        ):
             texts = await self._feed_text("Мой пропуск", None, {})
         self.assertTrue(any(PASS_EXPIRED in item for item in texts))
         self.assertFalse(self._photos())

@@ -249,6 +249,19 @@ def mark_damage(
     return trip
 
 
+def assert_can_close(engine: Engine, telegram_id: int, booking_id: int) -> None:
+    """Не открывает сверку, если рейс ещё нельзя закрыть."""
+    _yard(engine, telegram_id)
+    with Session(engine) as session:
+        booking = session.get(Booking, booking_id)
+        if booking is None:
+            raise YardError("Бронь не найдена.")
+        if booking.pause_reason:
+            raise YardError("Сначала продолжите разгрузку.")
+        if booking.status is not BookingStatus.unloading:
+            raise YardError("Сначала начните разгрузку.")
+
+
 def close_unload(
     engine: Engine,
     telegram_id: int,

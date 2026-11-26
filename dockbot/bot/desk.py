@@ -39,12 +39,14 @@ from dockbot.booking import (
 )
 from dockbot.bot.keyboard import keyboard_for
 from dockbot.bot.ui import (
+    BACK,
     CARGO_LABELS,
     CARGO_PREFIX,
     DATE_PREFIX,
     GATE_PREFIX,
     SLOT_PREFIX,
     actor_ids,
+    back_menu_markup,
     cargo_markup,
     dates_markup,
     gates_markup,
@@ -199,6 +201,20 @@ async def desk_slot(query: CallbackQuery, state: FSMContext) -> None:
     await state.update_data(slot_ts=int(raw))
     await state.set_state(DeskFlow.plate)
     await reply(query, "Госномер, например А123ВС178.", menu_markup())
+
+
+@router.callback_query(DeskFlow.gate, F.data == BACK)
+async def desk_back_to_dates(
+    query: CallbackQuery, state: FSMContext, engine: Engine
+) -> None:
+    await _dates(query, state, engine)
+
+
+@router.callback_query(DeskFlow.slot, F.data == BACK)
+async def desk_back_to_gates(
+    query: CallbackQuery, state: FSMContext, engine: Engine
+) -> None:
+    await _gates(query, state, engine)
 
 
 @router.message(DeskFlow.plate, F.text)
@@ -368,7 +384,7 @@ async def _gates(event, state: FSMContext, engine: Engine) -> None:
     )
     await state.set_state(DeskFlow.gate)
     if not gates:
-        await reply(event, "Свободных ворот нет. Вернитесь к дате.", menu_markup())
+        await reply(event, "Свободных ворот нет. Вернитесь к дате.", back_menu_markup())
         return
     await reply(event, "Выберите ворота.", gates_markup(gates))
 
@@ -378,7 +394,7 @@ async def _slots(event, state: FSMContext, engine: Engine) -> None:
     choices, zone = await _choices(engine, data)
     await state.set_state(DeskFlow.slot)
     if not choices:
-        await reply(event, "Свободных окон нет. Выберите другие ворота.", menu_markup())
+        await reply(event, "Свободных окон нет. Выберите другие ворота.", back_menu_markup())
         return
     text = "Выберите окно."
     phrase = await _window(engine, data)

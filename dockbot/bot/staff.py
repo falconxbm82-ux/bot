@@ -584,13 +584,14 @@ def _markup(engine: Engine, trip: Trip, role: StaffRole) -> InlineKeyboardMarkup
                 )
             ],
         )
-    rows.append(
-        [
-            InlineKeyboardButton(
-                text="Изменить данные", callback_data=f"st:edit:{trip.id}"
-            )
-        ]
-    )
+    if change_block(engine, trip) is None:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="Изменить данные", callback_data=f"st:edit:{trip.id}"
+                )
+            ]
+        )
     rows.append(
         [
             InlineKeyboardButton(text="К списку", callback_data=SHIFT),

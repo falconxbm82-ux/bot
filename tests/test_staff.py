@@ -67,6 +67,7 @@ from dockbot.booking import (  # noqa: E402
     unload_minutes,
     window_phrase,
     list_live,
+    list_closed_today,
     queue_note,
     slots_for_gate,
     update_vehicle,
@@ -108,6 +109,7 @@ from dockbot.qrscan import decode_qr  # noqa: E402
 from dockbot.yard import (  # noqa: E402
     CloseMismatch,
     YardError,
+    assert_can_close,
     close_unload,
     mark_damage,
     queue_for_trip,
@@ -1548,6 +1550,8 @@ class StaffTests(unittest.TestCase):
         with self.assertRaises(AccessDenied):
             set_pause(ENGINE, STAFF_TG, trip.id, "gate", now=NOW)
         paused = set_pause(ENGINE, WAREHOUSE_TG, trip.id, "gate", now=NOW)
+        with self.assertRaises(YardError):
+            assert_can_close(ENGINE, WAREHOUSE_TG, trip.id)
         self.assertEqual(paused.pause_reason, "gate")
         self.assertIn("Пауза: ворота заняты", card_text(paused, ZONE, None))
         self.assertIn("Пауза: ворота заняты", pass_caption(paused, ZONE))
@@ -1624,6 +1628,10 @@ class StaffTests(unittest.TestCase):
             now=NOW,
         )
         self.assertEqual(closed.status, BookingStatus.completed)
+        self.assertEqual(
+            [item.id for item in list_closed_today(ENGINE, DRIVER, DRIVER, now=NOW)],
+            [trip.id],
+        )
         self.assertIn("Рейс закрыт.", pass_caption(closed, ZONE))
         self.assertIn("Рейс закрыт.", card_text(closed, ZONE, None))
         self.assertIn("Мест: 10", card_text(closed, ZONE, None))
