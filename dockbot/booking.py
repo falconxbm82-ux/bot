@@ -148,6 +148,9 @@ class Trip:
     doc_file_id: str | None = None
     doc_name: str | None = None
     doc_result: str | None = None
+    unload_base: int | None = None
+    unload_addon: int | None = None
+    unload_total: int | None = None
 
 
 @dataclass(frozen=True)
@@ -190,13 +193,21 @@ def clean_make(raw: str) -> FieldValue:
     )
 
 
+_NAME_WORD = re.compile(r"^[A-Za-zА-Яа-яЁё]+$")
+DAY_TAKEN = "На этот день уже есть запись."
+
+
 def clean_driver_name(raw: str) -> FieldValue:
-    return _clean(
-        raw.strip(),
-        DRIVER_NAME_MAX,
-        "ФИО не может быть пустым.",
-        "ФИО обрезано до",
-    )
+    """ФИО: ровно три слова и только буквы."""
+    words = raw.split()
+    if len(words) != 3 or any(_NAME_WORD.fullmatch(word) is None for word in words):
+        raise FieldError(
+            "ФИО: ровно три слова, только буквы. Пример: Иванов Иван Иванович."
+        )
+    value = " ".join(words)
+    if len(value) > DRIVER_NAME_MAX:
+        raise FieldError(f"ФИО длиннее {DRIVER_NAME_MAX} символов.")
+    return FieldValue(value)
 
 
 def clean_weight_tons(raw: str) -> int:
@@ -210,14 +221,20 @@ def clean_weight_tons(raw: str) -> int:
     return tons * 1000
 
 
-def unload_minutes(base: int, weight_kg: int, step_kg: int) -> int:
-    """Норма типа плюс 15 мин за каждый шаг веса сверх первого. Потолок 240."""
+def unload_parts(base: int, weight_kg: int, step_kg: int) -> tuple[int, int, int]:
+    """База типа груза, добавка массы и итог не выше потолка."""
     step = step_kg if step_kg > 0 else DEFAULT_WEIGHT_STEP_KG
     if weight_kg <= 0:
         extra = 0
     else:
         extra = max(0, math.ceil(weight_kg / step) - 1) * WEIGHT_ADDON_MINUTES
-    return min(DURATION_CAP_MINUTES, base + extra)
+    total = min(DURATION_CAP_MINUTES, base + extra)
+    return base, extra, total
+
+
+def unload_minutes(base: int, weight_kg: int, step_kg: int) -> int:
+    """Норма типа плюс 15 мин за каждый шаг веса сверх первого. Потолок 240."""
+    return unload_parts(base, weight_kg, step_kg)[2]
 
 
 def clean_cargo(raw: str) -> FieldValue:
@@ -371,7 +388,7 @@ def create_booking(
     doc_result: str | None = None,
 ) -> Trip:
     moment = _aware(now)
-    plate_value = clean_plate(plate).value
+    plate_value = normalize_plate(plate)
     make_value = clean_make(make).value
     name_value = clean_driver_name(driver_name).value
     cargo_value = clean_cargo(cargo_type).value
@@ -585,7 +602,7 @@ def update_vehicle(
 ) -> Trip:
     """Меняет машину, водителя и груз. QR и PIN пропуска остаются."""
     moment = _aware(now)
-    plate_value = clean_plate(plate).value
+    plate_value = normalize_plate(plate)
     make_value = clean_make(make).value
     name_value = clean_driver_name(driver_name).value
     cargo_value = clean_cargo(cargo_type).value
@@ -598,6 +615,15 @@ def update_vehicle(
                 raise WindowClosed(reason)
             if reason is not None:
                 raise NotEditable(reason)
+            _reject_same_day(
+                session,
+                warehouse.zone,
+                booking.slot_start,
+                plate_value,
+                name_value,
+                booking.driver_telegram_id,
+                booking.id,
+            )
             token = booking.pass_token
             pin = booking.pass_pin
             booking.plate = plate_value
@@ -608,6 +634,55 @@ def update_vehicle(
             trip = _trip(session, booking)
             if trip.pass_token != token or trip.pass_pin != pin:
                 raise BookingError("Пропуск менять нельзя.")
+    _changed(trip.id)
+    return trip
+
+
+def staff_update_party(
+    engine: Engine,
+    *,
+    telegram_id: int,
+    booking_id: int,
+    plate: str,
+    make: str,
+    driver_name: str,
+    now: datetime | None = None,
+) -> Trip:
+    """Охрана, склад и администратор правят госномер, марку и ФИО."""
+    from dockbot.access import require_staff
+
+    require_staff(engine, telegram_id)
+    moment = _aware(now)
+    plate_value = normalize_plate(plate)
+    make_value = clean_make(make).value
+    name_value = clean_driver_name(driver_name).value
+    with Session(engine) as session:
+        with session.begin():
+            booking = session.get(Booking, booking_id, with_for_update=True)
+            if booking is None:
+                raise BookingNotFound("Бронь не найдена.")
+            warehouse = _load_warehouse(session)
+            reason = _block_reason(
+                booking.status, booking.slot_start, warehouse, moment
+            )
+            if reason is not None and reason.startswith("Отмена и перенос уже закрыты"):
+                raise WindowClosed(reason)
+            if reason is not None:
+                raise NotEditable(reason)
+            _reject_same_day(
+                session,
+                warehouse.zone,
+                booking.slot_start,
+                plate_value,
+                name_value,
+                booking.driver_telegram_id,
+                booking.id,
+            )
+            booking.plate = plate_value
+            booking.make = make_value
+            booking.driver_name = name_value
+            session.flush()
+            trip = _trip(session, booking)
     _changed(trip.id)
     return trip
 
@@ -735,15 +810,12 @@ def window_phrase(engine: Engine, cargo: str, weight_kg: int) -> str:
     with Session(engine) as session:
         base = _base_minutes(session, cargo)
         step = _step_kg(session)
-    tons = max(1, weight_kg // 1000)
     if base is None:
         return "Длину окна задают ворота. Вес к ней не добавляется."
-    total = unload_minutes(base, weight_kg, step)
-    extra = total - base
-    return (
-        f"Окно {total} мин: норма {base} + {extra} за вес {tons} т. "
-        f"Потолок {DURATION_CAP_MINUTES}."
-    )
+    base_minutes, extra, total = unload_parts(base, weight_kg, step)
+    from dockbot.present import unload_formula
+
+    return unload_formula(base_minutes, extra, total)
 
 
 def listen_booking_changed(listener: Callable[[int], None]) -> Callable[[], None]:
@@ -802,6 +874,15 @@ def _insert_booking(
     )
     if taken is not None:
         raise SlotTaken(taken)
+    _reject_same_day(
+        session,
+        warehouse.zone,
+        cell.start,
+        plate,
+        driver_name,
+        telegram_id,
+        None,
+    )
     status = (
         BookingStatus.confirmed
         if cell.start - now < CONFIRM_LEAD
@@ -1198,6 +1279,50 @@ def _is_occupied(
     return session.scalar(query) is not None
 
 
+def _plate_key(value: str) -> str:
+    try:
+        return normalize_plate(value)
+    except FieldError:
+        return "".join(value.upper().split())
+
+
+def _name_key(value: str) -> str:
+    folded = value.replace("ё", "е").replace("Ё", "Е")
+    return " ".join(folded.casefold().split())
+
+
+def _reject_same_day(
+    session: Session,
+    zone: ZoneInfo,
+    slot_start: datetime,
+    plate: str,
+    driver_name: str,
+    telegram_id: int | None,
+    ignore_booking_id: int | None,
+) -> None:
+    """Вторые сутки той же машины или того же водителя. Отмена не считается."""
+    day = slot_start.astimezone(zone).date()
+    start = _day_start(day, zone)
+    end = _day_start(day + timedelta(days=1), zone)
+    rows = session.scalars(
+        select(Booking).where(
+            Booking.slot_start >= start,
+            Booking.slot_start < end,
+            Booking.status != BookingStatus.cancelled,
+        )
+    ).all()
+    wanted_plate = _plate_key(plate)
+    wanted_name = _name_key(driver_name)
+    for row in rows:
+        if ignore_booking_id is not None and row.id == ignore_booking_id:
+            continue
+        same_plate = _plate_key(row.plate) == wanted_plate
+        same_name = _name_key(row.driver_name) == wanted_name
+        same_driver = telegram_id is not None and row.driver_telegram_id == telegram_id
+        if same_plate or same_name or same_driver:
+            raise BookingError(DAY_TAKEN)
+
+
 def _own_row(
     session: Session,
     gate_id: int,
@@ -1300,6 +1425,10 @@ def _trip(session: Session, booking: Booking) -> Trip:
     gate = session.get(Gate, booking.gate_id)
     if gate is None:
         raise BookingError("Ворота брони не найдены.")
+    base = _base_minutes(session, booking.cargo_type)
+    parts = None
+    if base is not None:
+        parts = unload_parts(base, int(booking.weight_kg or 0), _step_kg(session))
     return Trip(
         id=booking.id,
         gate_id=gate.id,
@@ -1324,6 +1453,9 @@ def _trip(session: Session, booking: Booking) -> Trip:
         doc_file_id=booking.doc_file_id,
         doc_name=booking.doc_name,
         doc_result=booking.doc_result,
+        unload_base=parts[0] if parts is not None else None,
+        unload_addon=parts[1] if parts is not None else None,
+        unload_total=parts[2] if parts is not None else None,
     )
 
 

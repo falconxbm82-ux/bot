@@ -10,7 +10,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message, ReplyKeyboardMarkup
 from sqlalchemy.engine import Engine
 
-from dockbot.bot.keyboard import CALLBACK_BOOK, CALLBACK_LIST, NAV_MENU, help_text, keyboard_for
+from dockbot.bot.keyboard import CALLBACK_BOOK, CALLBACK_LIST, help_text, keyboard_for
 
 router = Router(name="driver")
 
@@ -52,14 +52,32 @@ async def show_help(message: Message, engine: Engine) -> None:
     await message.answer(text, reply_markup=await _menu(message, engine))
 
 
-@router.callback_query(F.data == NAV_MENU)
-async def nav_menu(query: CallbackQuery, state: FSMContext, engine: Engine) -> None:
+async def role_markup(engine: Engine, telegram_id: int | None) -> ReplyKeyboardMarkup:
+    return await _keyboard(engine, telegram_id)
+
+
+async def send_role_menu(
+    event: Message | CallbackQuery, state: FSMContext, engine: Engine
+) -> None:
+    """В меню: сбросить шаг и вернуть нижнюю клавиатуру этой роли."""
+    from dockbot.documents import discard_document
+
+    data = await state.get_data()
     await state.clear()
-    message = query.message
-    await query.answer()
-    if message is None or not hasattr(message, "answer"):
+    discard_document(data.get("doc_name"))
+    user = event.from_user
+    markup = await _keyboard(engine, None if user is None else user.id)
+    text = "Меню."
+    if isinstance(event, Message):
+        await event.answer(text, reply_markup=markup)
         return
-    await message.answer("Меню.", reply_markup=await _menu_for(query, engine))
+    await event.answer()
+    message = event.message
+    if message is not None and hasattr(message, "answer"):
+        await message.answer(text, reply_markup=markup)
+        return
+    if user is not None:
+        await event.bot.send_message(user.id, text, reply_markup=markup)
 
 
 @router.message(Command("cancel"))
@@ -77,11 +95,6 @@ async def cancel_dialog(message: Message, state: FSMContext, engine: Engine) -> 
 
 async def _menu(message: Message, engine: Engine) -> ReplyKeyboardMarkup:
     user = message.from_user
-    return await _keyboard(engine, None if user is None else user.id)
-
-
-async def _menu_for(query: CallbackQuery, engine: Engine) -> ReplyKeyboardMarkup:
-    user = query.from_user
     return await _keyboard(engine, None if user is None else user.id)
 
 

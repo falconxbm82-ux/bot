@@ -10,7 +10,7 @@ import asyncio
 
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
-from aiogram.types import Message
+from aiogram.types import CallbackQuery, Message
 from sqlalchemy.engine import Engine
 
 from dockbot.access import active_staff, logout_staff
@@ -27,6 +27,7 @@ from dockbot.bot.keyboard import (
     MOVE_TRIP,
     MY_BOOKINGS,
     MY_PASS,
+    NAV_MENU,
     ON_SITE,
     ROLE_DRIVER,
     ROLE_GUARD,
@@ -62,7 +63,10 @@ from dockbot.bot.staff import (
     open_pass_pin,
     open_shift,
 )
-from dockbot.bot.wizard import show_dates
+from dockbot.bot.driver import role_markup, send_role_menu
+from dockbot.bot.ui import reply
+from dockbot.bot.wizard import show_vehicle
+from dockbot.documents import discard_document
 from dockbot.models import StaffRole
 
 router = Router(name="roles")
@@ -98,10 +102,40 @@ async def choose_warehouse(
     await _choose_staff(message, state, engine, StaffRole.warehouse, WAREHOUSE_TEXT)
 
 
+@router.callback_query(F.data == NAV_MENU)
+async def open_menu(query: CallbackQuery, state: FSMContext, engine: Engine) -> None:
+    await send_role_menu(query, state, engine)
+
+
+@router.message(F.text == "В меню")
+async def open_menu_text(message: Message, state: FSMContext, engine: Engine) -> None:
+    await send_role_menu(message, state, engine)
+
+
+@router.callback_query(F.data == "bk:abort")
+async def abort_dialog(query: CallbackQuery, state: FSMContext, engine: Engine) -> None:
+    data = await state.get_data()
+    current = await state.get_state()
+    if current is None and not data:
+        await query.answer("Кнопка устарела", show_alert=True)
+        return
+    discard_document(data.get("doc_name"))
+    await state.clear()
+    if current and str(current).startswith("DeskFlow"):
+        text = "Запись без чата отменена."
+    elif data.get("mode") == "move":
+        text = "Диалог сброшен. Бронь не изменена."
+    else:
+        text = "Диалог сброшен. Запись не сохранена."
+    user = query.from_user
+    markup = await role_markup(engine, None if user is None else user.id)
+    await reply(query, text, markup)
+
+
 @router.message(F.text == BOOK)
 async def choose_book(message: Message, state: FSMContext, engine: Engine) -> None:
     await state.set_data({"mode": "create"})
-    await show_dates(message, state, engine)
+    await show_vehicle(message, state, engine)
 
 
 @router.message(F.text == MY_BOOKINGS)

@@ -57,7 +57,7 @@ def trip_line(trip: Trip, zone: ZoneInfo) -> str:
     )
     line = (
         f"{clock} {gate_label(trip.gate_code)} {trip.plate} "
-        f"{trip.driver_name} · {detail} — {STATUS_LABELS[trip.status]}"
+        f"{trip.driver_name} {detail} {STATUS_LABELS[trip.status]}"
     )
     marks: list[str] = []
     if trip.urgent:
@@ -69,7 +69,7 @@ def trip_line(trip: Trip, zone: ZoneInfo) -> str:
     if trip.overrun:
         marks.append("дольше окна")
     if marks:
-        line = f"{line} · {' · '.join(marks)}"
+        line = f"{line} {' '.join(marks)}"
     return line
 
 
@@ -169,7 +169,7 @@ def _gate_actions(engine: Engine, trip: Trip) -> tuple[ShiftAction, ...]:
     return tuple(
         ShiftAction(
             BookingStatus.unloading,
-            f"На воротах {gate.code} · {int(counts.get(gate.id, 0))}",
+            f"На воротах {gate.code} {int(counts.get(gate.id, 0))}",
             f"st:gate:{trip.id}:{gate.id}",
         )
         for gate in chosen

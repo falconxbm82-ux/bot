@@ -32,6 +32,8 @@ def _test_database_url() -> str:
 os.environ["DATABASE_URL"] = _test_database_url()
 
 from dockbot.booking import (  # noqa: E402
+    DAY_TAKEN,
+    BookingError,
     FieldError,
     NotEditable,
     SlotTaken,
@@ -40,10 +42,14 @@ from dockbot.booking import (  # noqa: E402
     available_dates,
     cancel_booking,
     change_block,
+    clean_driver_name,
+    clean_make,
     clean_plate,
+    clean_weight_tons,
     create_booking,
     get_owned,
     list_future,
+    normalize_plate,
     reschedule_booking,
     slots_for_gate,
 )
@@ -151,11 +157,144 @@ class BookingTests(unittest.TestCase):
             self.assertEqual(event.to_status, BookingStatus.booked)
             self.assertEqual(event.source, StatusSource.driver)
 
-    def test_same_vehicle_can_book_another_time(self) -> None:
+    def test_same_plate_or_driver_cannot_book_the_same_day_twice(self) -> None:
         first = self._book(TOMORROW, 8, plate="a100aa77")
-        second = self._book(TOMORROW, 9, plate="a100aa77")
-        self.assertNotEqual(first.id, second.id)
-        self.assertEqual(second.plate, "A100AA77")
+        self.assertEqual(first.plate, "А100АА77")
+        with self.assertRaises(BookingError) as same_plate:
+            self._book(
+                TOMORROW,
+                9,
+                plate="А100АА77",
+                telegram_id=9,
+                chat_id=9,
+                driver_name="Петров Петр Петрович",
+            )
+        self.assertEqual(str(same_plate.exception), DAY_TAKEN)
+        with self.assertRaises(BookingError) as same_name:
+            self._book(
+                TOMORROW,
+                9,
+                plate="В200ВВ77",
+                telegram_id=9,
+                chat_id=9,
+                driver_name="Иванов Иван Иванович",
+            )
+        self.assertEqual(str(same_name.exception), DAY_TAKEN)
+        with self.assertRaises(BookingError):
+            self._book(
+                TOMORROW,
+                9,
+                plate="В200ВВ77",
+                telegram_id=1,
+                chat_id=1,
+                driver_name="Сидоров Сидор Сидорович",
+            )
+        cancel_booking(ENGINE, telegram_id=1, chat_id=1, booking_id=first.id, now=NOW)
+        again = self._book(TOMORROW, 9, plate="А100АА77")
+        self.assertNotEqual(again.id, first.id)
+        other_day = self._book(TODAY, 10, plate="А100АА77", telegram_id=8, chat_id=8)
+        self.assertNotEqual(other_day.id, again.id)
+
+    def test_driver_fields_say_what_to_fix(self) -> None:
+        self.assertEqual(
+            clean_driver_name("  Иванов   Иван   Иванович ").value,
+            "Иванов Иван Иванович",
+        )
+        for bad in ("Иванов Иван", "Иванов Иван 3", "Иванов Иван Иванович лишний"):
+            with self.assertRaises(FieldError) as caught:
+                clean_driver_name(bad)
+            self.assertIn("три слова", str(caught.exception))
+        with self.assertRaises(FieldError) as plate:
+            normalize_plate("A1")
+        self.assertIn("А123ВС178", str(plate.exception))
+        with self.assertRaises(FieldError) as make:
+            clean_make("   ")
+        self.assertIn("пуст", str(make.exception))
+        for bad_weight in ("нет", "0", "41", "1.5"):
+            with self.assertRaises(FieldError) as weight:
+                clean_weight_tons(bad_weight)
+            self.assertIn("1 до 40", str(weight.exception))
+        self.assertEqual(clean_weight_tons("6 т"), 6000)
+
+    def test_occupied_window_hides_until_cancel_and_two_confirms_stay_one(self) -> None:
+        from dockbot.present import card_text
+
+        start = self._slot(TOMORROW, self.gate_a, 8).start
+        trip = create_booking(
+            ENGINE,
+            gate_id=self.gate_a,
+            slot_start=start,
+            plate="А123ВС178",
+            make="КАМАЗ",
+            driver_name="Иванов Иван Иванович",
+            cargo_type="Паллеты",
+            telegram_id=1,
+            chat_id=1,
+            now=NOW,
+            weight_kg=6000,
+        )
+        self.assertEqual(trip.unload_total, 75)
+        self.assertEqual(trip.slot_end - trip.slot_start, timedelta(minutes=75))
+        self.assertIn(
+            "Разгрузка: база 60 мин, масса +15 мин, итого 75 мин, потолок 240",
+            card_text(trip, ZONE, None),
+        )
+        hidden = [
+            item.start
+            for item in slots_for_gate(
+                ENGINE, TOMORROW, self.gate_a, now=NOW, cargo="Паллеты", weight_kg=1000
+            )
+        ]
+        self.assertNotIn(start, hidden)
+        cancel_booking(ENGINE, telegram_id=1, chat_id=1, booking_id=trip.id, now=NOW)
+        shown = [
+            item.start
+            for item in slots_for_gate(
+                ENGINE, TOMORROW, self.gate_a, now=NOW, cargo="Паллеты", weight_kg=1000
+            )
+        ]
+        self.assertIn(start, shown)
+        first = create_booking(
+            ENGINE,
+            gate_id=self.gate_a,
+            slot_start=start,
+            plate="А123ВС178",
+            make="КАМАЗ",
+            driver_name="Иванов Иван Иванович",
+            cargo_type="Паллеты",
+            telegram_id=1,
+            chat_id=1,
+            now=NOW,
+            weight_kg=6000,
+        )
+        second = create_booking(
+            ENGINE,
+            gate_id=self.gate_a,
+            slot_start=start,
+            plate="А123ВС178",
+            make="КАМАЗ",
+            driver_name="Иванов Иван Иванович",
+            cargo_type="Паллеты",
+            telegram_id=1,
+            chat_id=1,
+            now=NOW,
+            weight_kg=6000,
+        )
+        self.assertEqual(first.id, second.id)
+        with self.assertRaises(SlotTaken):
+            create_booking(
+                ENGINE,
+                gate_id=self.gate_a,
+                slot_start=start,
+                plate="В777ВВ77",
+                make="ГАЗ",
+                driver_name="Петров Петр Петрович",
+                cargo_type="Паллеты",
+                telegram_id=2,
+                chat_id=2,
+                now=NOW,
+                weight_kg=1000,
+            )
 
     def test_failed_confirm_leaves_no_booking_and_no_event(self) -> None:
         from dockbot import booking as booking_module
@@ -175,7 +314,7 @@ class BookingTests(unittest.TestCase):
                     slot_start=slot.start,
                     plate="A100AA77",
                     make="КАМАЗ",
-                    driver_name="Иванов",
+                    driver_name="Иванов Иван Иванович",
                     cargo_type="Паллеты",
                     telegram_id=1,
                     chat_id=1,
@@ -194,9 +333,9 @@ class BookingTests(unittest.TestCase):
             ENGINE,
             gate_id=self.gate_a,
             slot_start=slot.start,
-            plate="A1",
+            plate="А001АА77",
             make="Volvo",
-            driver_name="Иванов",
+            driver_name="Иванов Иван Иванович",
             cargo_type="паллеты",
             telegram_id=1,
             chat_id=1,
@@ -206,9 +345,9 @@ class BookingTests(unittest.TestCase):
             ENGINE,
             gate_id=self.gate_a,
             slot_start=slot.start,
-            plate="A1",
+            plate="А001АА77",
             make="Volvo",
-            driver_name="Иванов",
+            driver_name="Иванов Иван Иванович",
             cargo_type="паллеты",
             telegram_id=1,
             chat_id=1,
@@ -229,9 +368,13 @@ class BookingTests(unittest.TestCase):
                     ENGINE,
                     gate_id=self.gate_a,
                     slot_start=slot.start,
-                    plate=f"A{telegram_id}",
+                    plate="А011АА77" if telegram_id == 11 else "А012АА77",
                     make="Volvo",
-                    driver_name="Водитель",
+                    driver_name=(
+                        "Иванов Иван Иванович"
+                        if telegram_id == 11
+                        else "Петров Петр Петрович"
+                    ),
                     cargo_type="груз",
                     telegram_id=telegram_id,
                     chat_id=telegram_id,
@@ -263,9 +406,13 @@ class BookingTests(unittest.TestCase):
                 ENGINE,
                 gate_id=gate_id,
                 slot_start=slot.start,
-                plate=f"B{telegram_id}",
+                plate="В021ВВ77" if telegram_id == 21 else "В022ВВ77",
                 make="MAN",
-                driver_name="Водитель",
+                driver_name=(
+                    "Сидоров Сидор Сидорович"
+                    if telegram_id == 21
+                    else "Алексеев Алексей Алексеевич"
+                ),
                 cargo_type="груз",
                 telegram_id=telegram_id,
                 chat_id=telegram_id,
@@ -296,7 +443,15 @@ class BookingTests(unittest.TestCase):
             for item in slots_for_gate(ENGINE, TOMORROW, self.gate_a, now=NOW)
         ]
         self.assertIn(8, freed)
-        again = self._book(TOMORROW, 8, telegram_id=9, chat_id=9, slot_start=slot.start)
+        again = self._book(
+            TOMORROW,
+            8,
+            telegram_id=9,
+            chat_id=9,
+            slot_start=slot.start,
+            plate="В200ВВ77",
+            driver_name="Петров Петр Петрович",
+        )
         self.assertNotEqual(again.id, trip.id)
         self.assertEqual(self._occupying(self.gate_a, slot.start), 1)
 
@@ -339,7 +494,14 @@ class BookingTests(unittest.TestCase):
         self.assertEqual(moved.pass_token, original.pass_token)
         self.assertEqual(moved.pass_pin, original.pass_pin)
         self.assertEqual(int(moved.slot_start.timestamp()), int(target.start.timestamp()))
-        other = self._book(TOMORROW, 8, telegram_id=5, chat_id=5)
+        other = self._book(
+            TOMORROW,
+            8,
+            telegram_id=5,
+            chat_id=5,
+            plate="В200ВВ77",
+            driver_name="Петров Петр Петрович",
+        )
         held = self._start(other.id)
         with self.assertRaises(SlotTaken):
             reschedule_booking(
@@ -421,6 +583,7 @@ class BookingTests(unittest.TestCase):
         chat_id: int = 1,
         plate: str = "A100AA77",
         slot_start: datetime | None = None,
+        driver_name: str = "Иванов Иван Иванович",
     ):
         gate = self.gate_a if gate_id is None else gate_id
         start = slot_start or self._slot(day, gate, hour).start
@@ -430,7 +593,7 @@ class BookingTests(unittest.TestCase):
             slot_start=start,
             plate=plate,
             make="Volvo",
-            driver_name="Иванов Иван",
+            driver_name=driver_name,
             cargo_type="паллеты",
             telegram_id=telegram_id,
             chat_id=chat_id,
