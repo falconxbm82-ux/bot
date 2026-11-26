@@ -108,7 +108,7 @@ class ButtonTests(unittest.IsolatedAsyncioTestCase):
             "vehicle": "heavy",
         }
         with (
-            patch("dockbot.bot.wizard.driver_known", return_value=True),
+            patch("dockbot.bot.wizard.roster_problem", return_value=None),
             patch("dockbot.bot.wizard.pair_booked_on", return_value=True),
         ):
             texts = await self._feed_text("Иванов Иван Иванович", BookFlow.driver_name, stored)
@@ -116,12 +116,34 @@ class ButtonTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(any("Фото документа" in item for item in texts))
         self.assertEqual(await self._state(), BookFlow.plate.state)
         with (
-            patch("dockbot.bot.wizard.driver_known", return_value=False),
+            patch("dockbot.bot.wizard.roster_problem", return_value=NOT_LISTED),
             patch("dockbot.bot.wizard.pair_booked_on", return_value=False),
         ):
             texts = await self._feed_text("Иванов Иван Иванович", BookFlow.driver_name, stored)
         self.assertTrue(any(NOT_LISTED in item for item in texts))
+        self.assertIn("\u0410123\u0412\u0421178", "\n".join(texts))
         self.assertEqual(await self._state(), BookFlow.plate.state)
+
+    async def test_wrong_name_keeps_the_plate(self) -> None:
+        from unittest.mock import patch
+
+        from dockbot.roster import NAME_MISMATCH
+
+        stored = {
+            "mode": "create",
+            "plate": "В200ВВ77",
+            "cargo": "Паллеты",
+            "weight_kg": 1000,
+            "vehicle": "heavy",
+        }
+        with patch("dockbot.bot.wizard.roster_problem", return_value=NAME_MISMATCH):
+            texts = await self._feed_text(
+                "Сидоров Сидор Сидорович", BookFlow.driver_name, stored
+            )
+        self.assertTrue(any(NAME_MISMATCH in item for item in texts))
+        self.assertEqual(await self._state(), BookFlow.driver_name.state)
+        data = await self.dp.storage.get_data(self._key())
+        self.assertEqual(data.get("plate"), "В200ВВ77")
 
     async def test_expired_pass_is_refused_for_the_driver_and_security(self) -> None:
         from datetime import timedelta

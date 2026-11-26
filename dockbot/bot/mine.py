@@ -16,6 +16,7 @@ from dockbot.booking import (
     DAY_TAKEN,
     HEAVY_CARGOS,
     LIGHT_CARGOS,
+    NAME_MISMATCH,
     NOT_LISTED,
     BookingError,
     BookingNotFound,
@@ -30,7 +31,7 @@ from dockbot.booking import (
     clean_cargo,
     clean_driver_name,
     clean_make,
-    driver_known,
+    roster_problem,
     get_owned,
     normalize_plate,
     list_closed_today,
@@ -557,7 +558,7 @@ async def party_name(message: Message, state: FSMContext, engine: Engine) -> Non
     plate = data.get("plate") or ""
     try:
         trip = await asyncio.to_thread(get_owned, engine, ids[0], ids[1], int(data["booking_id"]))
-        known = await asyncio.to_thread(driver_known, engine, plate, field.value)
+        problem = await asyncio.to_thread(roster_problem, engine, plate, field.value)
         zone = await asyncio.to_thread(load_zone, engine)
         taken = await asyncio.to_thread(
             pair_booked_on,
@@ -573,7 +574,10 @@ async def party_name(message: Message, state: FSMContext, engine: Engine) -> Non
     except BookingError as exc:
         await message.answer(str(exc))
         return
-    if not known:
+    if problem == NAME_MISMATCH:
+        await message.answer(NAME_MISMATCH)
+        return
+    if problem:
         await message.answer(NOT_LISTED)
         return
     if taken:

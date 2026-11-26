@@ -19,6 +19,7 @@ from dockbot.booking import (
     DAY_TAKEN,
     HEAVY_CARGOS,
     LIGHT_CARGOS,
+    NAME_MISMATCH,
     NOT_LISTED,
     BookingError,
     FieldError,
@@ -32,7 +33,7 @@ from dockbot.booking import (
     clean_weight_tons,
     booking_profile,
     create_booking,
-    driver_known,
+    roster_problem,
     gates_with_slots,
     window_rules,
     get_owned,
@@ -917,11 +918,14 @@ async def _party_allowed(
     data: dict,
 ) -> bool:
     try:
-        known = await asyncio.to_thread(driver_known, engine, plate, name)
+        problem = await asyncio.to_thread(roster_problem, engine, plate, name)
     except FieldError as exc:
         await message.answer(str(exc))
         return False
-    if not known:
+    if problem == NAME_MISMATCH:
+        await message.answer(NAME_MISMATCH)
+        return False
+    if problem:
         await state.set_state(BookFlow.plate)
         await message.answer(
             f"{NOT_LISTED}\nГосномер, например А123ВС178.",

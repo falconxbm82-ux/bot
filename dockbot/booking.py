@@ -48,6 +48,7 @@ from dockbot.models import (
 )
 from dockbot.roster import (
     LIGHT_NORMS,
+    NAME_MISMATCH,
     NOT_LISTED,
     STAND_DRIVERS,
     matches,
@@ -497,8 +498,9 @@ def create_booking(
     kind = _vehicle(vehicle)
     checked_weight = _checked_weight(weight_kg, kind)
     checked_places = _checked_places(place_count)
-    if not driver_known(engine, plate_value, name_value):
-        raise BookingError(NOT_LISTED)
+    problem = roster_problem(engine, plate_value, name_value)
+    if problem is not None:
+        raise BookingError(problem)
     if doc_result == MISMATCH:
         raise BookingError("Данные не сходятся. Запись не завершена.")
     checked_doc = _checked_document(doc_file_id, doc_name, doc_result)
@@ -724,8 +726,9 @@ def update_vehicle(
                 raise WindowClosed(reason)
             if reason is not None:
                 raise NotEditable(reason)
-            if not driver_known(engine, plate_value, name_value):
-                raise BookingError(NOT_LISTED)
+            problem = roster_problem(engine, plate_value, name_value)
+            if problem is not None:
+                raise BookingError(problem)
             _reject_same_day(
                 session,
                 warehouse.zone,
@@ -780,8 +783,9 @@ def staff_update_party(
                 raise WindowClosed(reason)
             if reason is not None:
                 raise NotEditable(reason)
-            if not driver_known(engine, plate_value, name_value):
-                raise BookingError(NOT_LISTED)
+            problem = roster_problem(engine, plate_value, name_value)
+            if problem is not None:
+                raise BookingError(problem)
             _reject_same_day(
                 session,
                 warehouse.zone,
@@ -994,19 +998,49 @@ def known_driver_rows(engine: Engine) -> list[tuple[str, str]]:
     return [(row.driver_name, row.plate) for row in rows]
 
 
-def driver_known(engine: Engine, plate: str, name: str) -> bool:
-    """Пара ФИО и госномер есть в базе стенда."""
+def roster_problem(engine: Engine, plate: str, name: str) -> str | None:
+    """None, если пара в списке. Иначе короткая причина для водителя."""
     plate_value = normalize_plate(plate)
     name_value = clean_driver_name(name).value
     with Session(engine) as session:
         rows = session.execute(
             select(KnownDriver.driver_name, KnownDriver.plate)
         ).all()
-    source = rows or STAND_DRIVERS
-    return any(
-        matches(plate_value, name_value, row_name, row_plate)
-        for row_name, row_plate in source
-    )
+    return _roster_problem(plate_value, name_value, rows or STAND_DRIVERS)
+
+
+def driver_known(engine: Engine, plate: str, name: str) -> bool:
+    """Пара ФИО и госномер есть в базе стенда."""
+    return roster_problem(engine, plate, name) is None
+
+
+def _roster_plate(raw: str) -> str:
+    """Латинские двойники B/В и C/С считаются тем же номером, что в списке."""
+    try:
+        return normalize_plate(raw)
+    except FieldError:
+        return "".join(raw.upper().split()).translate(_PLATE_LATIN)
+
+
+def _roster_problem(
+    plate_value: str, name_value: str, source: list[tuple[str, str]] | tuple
+) -> str | None:
+    folded = _name_key(name_value)
+    plate_known = False
+    name_on_other = False
+    for row_name, row_plate in source:
+        roster_plate = _roster_plate(str(row_plate))
+        same_plate = roster_plate == plate_value
+        same_name = _name_key(str(row_name)) == folded
+        if matches(plate_value, name_value, str(row_name), roster_plate):
+            return None
+        if same_plate:
+            plate_known = True
+        elif same_name:
+            name_on_other = True
+    if plate_known and name_on_other:
+        return NAME_MISMATCH
+    return NOT_LISTED
 
 
 def pair_booked_on(

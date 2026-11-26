@@ -16,6 +16,7 @@ from dockbot.booking import (
     DAY_TAKEN,
     HEAVY_CARGOS,
     LIGHT_CARGOS,
+    NAME_MISMATCH,
     NOT_LISTED,
     BookingError,
     FieldError,
@@ -28,7 +29,7 @@ from dockbot.booking import (
     clean_make,
     clean_weight_tons,
     create_booking,
-    driver_known,
+    roster_problem,
     gates_with_slots,
     load_zone,
     normalize_plate,
@@ -254,11 +255,14 @@ async def desk_name(message: Message, state: FSMContext, engine: Engine) -> None
     data = await state.get_data()
     plate = data.get("plate") or ""
     try:
-        known = await asyncio.to_thread(driver_known, engine, plate, field.value)
+        problem = await asyncio.to_thread(roster_problem, engine, plate, field.value)
     except FieldError as exc:
         await message.answer(str(exc))
         return
-    if not known:
+    if problem == NAME_MISMATCH:
+        await message.answer(NAME_MISMATCH)
+        return
+    if problem:
         await state.set_state(DeskFlow.plate)
         await message.answer(f"{NOT_LISTED}\nГосномер, например А123ВС178.")
         return
